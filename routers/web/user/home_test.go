@@ -1,6 +1,5 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package user
 
@@ -8,7 +7,8 @@ import (
 	"net/http"
 	"testing"
 
-	"code.gitea.io/gitea/models"
+	repo_model "code.gitea.io/gitea/models/repo"
+	"code.gitea.io/gitea/models/unittest"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/test"
 
@@ -18,15 +18,15 @@ import (
 func TestArchivedIssues(t *testing.T) {
 	// Arrange
 	setting.UI.IssuePagingNum = 1
-	assert.NoError(t, models.LoadFixtures())
+	assert.NoError(t, unittest.LoadFixtures())
 
 	ctx := test.MockContext(t, "issues")
 	test.LoadUser(t, ctx, 30)
 	ctx.Req.Form.Set("state", "open")
 
 	// Assume: User 30 has access to two Repos with Issues, one of the Repos being archived.
-	repos, _, _ := models.GetUserRepositories(&models.SearchRepoOptions{Actor: ctx.User})
-	assert.Len(t, repos, 2)
+	repos, _, _ := repo_model.GetUserRepositories(&repo_model.SearchRepoOptions{Actor: ctx.Doer})
+	assert.Len(t, repos, 3)
 	IsArchived := make(map[int64]bool)
 	NumIssues := make(map[int64]int)
 	for _, repo := range repos {
@@ -51,7 +51,7 @@ func TestArchivedIssues(t *testing.T) {
 
 func TestIssues(t *testing.T) {
 	setting.UI.IssuePagingNum = 1
-	assert.NoError(t, models.LoadFixtures())
+	assert.NoError(t, unittest.LoadFixtures())
 
 	ctx := test.MockContext(t, "issues")
 	test.LoadUser(t, ctx, 2)
@@ -67,7 +67,7 @@ func TestIssues(t *testing.T) {
 
 func TestPulls(t *testing.T) {
 	setting.UI.IssuePagingNum = 20
-	assert.NoError(t, models.LoadFixtures())
+	assert.NoError(t, unittest.LoadFixtures())
 
 	ctx := test.MockContext(t, "pulls")
 	test.LoadUser(t, ctx, 2)
@@ -75,12 +75,12 @@ func TestPulls(t *testing.T) {
 	Pulls(ctx)
 	assert.EqualValues(t, http.StatusOK, ctx.Resp.Status())
 
-	assert.Len(t, ctx.Data["Issues"], 3)
+	assert.Len(t, ctx.Data["Issues"], 4)
 }
 
 func TestMilestones(t *testing.T) {
 	setting.UI.IssuePagingNum = 1
-	assert.NoError(t, models.LoadFixtures())
+	assert.NoError(t, unittest.LoadFixtures())
 
 	ctx := test.MockContext(t, "milestones")
 	test.LoadUser(t, ctx, 2)
@@ -99,7 +99,7 @@ func TestMilestones(t *testing.T) {
 
 func TestMilestonesForSpecificRepo(t *testing.T) {
 	setting.UI.IssuePagingNum = 1
-	assert.NoError(t, models.LoadFixtures())
+	assert.NoError(t, unittest.LoadFixtures())
 
 	ctx := test.MockContext(t, "milestones")
 	test.LoadUser(t, ctx, 2)

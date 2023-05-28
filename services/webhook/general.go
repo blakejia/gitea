@@ -1,28 +1,31 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package webhook
 
 import (
 	"fmt"
 	"html"
+	"net/url"
 	"strings"
 
+	webhook_model "code.gitea.io/gitea/models/webhook"
 	"code.gitea.io/gitea/modules/setting"
 	api "code.gitea.io/gitea/modules/structs"
+	"code.gitea.io/gitea/modules/util"
+	webhook_module "code.gitea.io/gitea/modules/webhook"
 )
 
 type linkFormatter = func(string, string) string
 
 // noneLinkFormatter does not create a link but just returns the text
-func noneLinkFormatter(url string, text string) string {
+func noneLinkFormatter(url, text string) string {
 	return text
 }
 
 // htmlLinkFormatter creates a HTML link
-func htmlLinkFormatter(url string, text string) string {
-	return fmt.Sprintf(`<a href="%s">%s</a>`, url, html.EscapeString(text))
+func htmlLinkFormatter(url, text string) string {
+	return fmt.Sprintf(`<a href="%s">%s</a>`, html.EscapeString(url), html.EscapeString(text))
 }
 
 func getIssuesPayloadInfo(p *api.IssuePayload, linkFormatter linkFormatter, withSender bool) (string, string, string, int) {
@@ -46,7 +49,7 @@ func getIssuesPayloadInfo(p *api.IssuePayload, linkFormatter linkFormatter, with
 	case api.HookIssueAssigned:
 		list := make([]string, len(p.Issue.Assignees))
 		for i, user := range p.Issue.Assignees {
-			list[i] = linkFormatter(setting.AppURL+user.UserName, user.UserName)
+			list[i] = linkFormatter(setting.AppURL+url.PathEscape(user.UserName), user.UserName)
 		}
 		text = fmt.Sprintf("[%s] Issue assigned to %s: %s", repoLink, strings.Join(list, ", "), titleLink)
 		color = greenColor
@@ -66,7 +69,7 @@ func getIssuesPayloadInfo(p *api.IssuePayload, linkFormatter linkFormatter, with
 		text = fmt.Sprintf("[%s] Issue milestone cleared: %s", repoLink, titleLink)
 	}
 	if withSender {
-		text += fmt.Sprintf(" by %s", linkFormatter(setting.AppURL+p.Sender.UserName, p.Sender.UserName))
+		text += fmt.Sprintf(" by %s", linkFormatter(setting.AppURL+url.PathEscape(p.Sender.UserName), p.Sender.UserName))
 	}
 
 	var attachmentText string
@@ -82,11 +85,13 @@ func getPullRequestPayloadInfo(p *api.PullRequestPayload, linkFormatter linkForm
 	issueTitle := fmt.Sprintf("#%d %s", p.Index, p.PullRequest.Title)
 	titleLink := linkFormatter(p.PullRequest.URL, issueTitle)
 	var text string
+	var attachmentText string
 	color := yellowColor
 
 	switch p.Action {
 	case api.HookIssueOpened:
 		text = fmt.Sprintf("[%s] Pull request opened: %s", repoLink, titleLink)
+		attachmentText = p.PullRequest.Body
 		color = greenColor
 	case api.HookIssueClosed:
 		if p.PullRequest.HasMerged {
@@ -100,6 +105,7 @@ func getPullRequestPayloadInfo(p *api.PullRequestPayload, linkFormatter linkForm
 		text = fmt.Sprintf("[%s] Pull request re-opened: %s", repoLink, titleLink)
 	case api.HookIssueEdited:
 		text = fmt.Sprintf("[%s] Pull request edited: %s", repoLink, titleLink)
+		attachmentText = p.PullRequest.Body
 	case api.HookIssueAssigned:
 		list := make([]string, len(p.PullRequest.Assignees))
 		for i, user := range p.PullRequest.Assignees {
@@ -124,14 +130,10 @@ func getPullRequestPayloadInfo(p *api.PullRequestPayload, linkFormatter linkForm
 		text = fmt.Sprintf("[%s] Pull request milestone cleared: %s", repoLink, titleLink)
 	case api.HookIssueReviewed:
 		text = fmt.Sprintf("[%s] Pull request reviewed: %s", repoLink, titleLink)
+		attachmentText = p.Review.Content
 	}
 	if withSender {
 		text += fmt.Sprintf(" by %s", linkFormatter(setting.AppURL+p.Sender.UserName, p.Sender.UserName))
-	}
-
-	var attachmentText string
-	if p.Action == api.HookIssueOpened || p.Action == api.HookIssueEdited {
-		attachmentText = p.PullRequest.Body
 	}
 
 	return text, issueTitle, attachmentText, color
@@ -139,7 +141,7 @@ func getPullRequestPayloadInfo(p *api.PullRequestPayload, linkFormatter linkForm
 
 func getReleasePayloadInfo(p *api.ReleasePayload, linkFormatter linkFormatter, withSender bool) (text string, color int) {
 	repoLink := linkFormatter(p.Repository.HTMLURL, p.Repository.FullName)
-	refLink := linkFormatter(p.Repository.HTMLURL+"/src/"+p.Release.TagName, p.Release.TagName)
+	refLink := linkFormatter(p.Repository.HTMLURL+"/releases/tag/"+util.PathEscapeSegments(p.Release.TagName), p.Release.TagName)
 
 	switch p.Action {
 	case api.HookReleasePublished:
@@ -153,10 +155,39 @@ func getReleasePayloadInfo(p *api.ReleasePayload, linkFormatter linkFormatter, w
 		color = redColor
 	}
 	if withSender {
-		text += fmt.Sprintf(" by %s", linkFormatter(setting.AppURL+p.Sender.UserName, p.Sender.UserName))
+		text += fmt.Sprintf(" by %s", linkFormatter(setting.AppURL+url.PathEscape(p.Sender.UserName), p.Sender.UserName))
 	}
 
 	return text, color
+}
+
+func getWikiPayloadInfo(p *api.WikiPayload, linkFormatter linkFormatter, withSender bool) (string, int, string) {
+	repoLink := linkFormatter(p.Repository.HTMLURL, p.Repository.FullName)
+	pageLink := linkFormatter(p.Repository.HTMLURL+"/wiki/"+url.PathEscape(p.Page), p.Page)
+
+	var text string
+	color := greenColor
+
+	switch p.Action {
+	case api.HookWikiCreated:
+		text = fmt.Sprintf("[%s] New wiki page '%s'", repoLink, pageLink)
+	case api.HookWikiEdited:
+		text = fmt.Sprintf("[%s] Wiki page '%s' edited", repoLink, pageLink)
+		color = yellowColor
+	case api.HookWikiDeleted:
+		text = fmt.Sprintf("[%s] Wiki page '%s' deleted", repoLink, pageLink)
+		color = redColor
+	}
+
+	if p.Action != api.HookWikiDeleted && p.Comment != "" {
+		text += fmt.Sprintf(" (%s)", p.Comment)
+	}
+
+	if withSender {
+		text += fmt.Sprintf(" by %s", linkFormatter(setting.AppURL+url.PathEscape(p.Sender.UserName), p.Sender.UserName))
+	}
+
+	return text, color, pageLink
 }
 
 func getIssueCommentPayloadInfo(p *api.IssueCommentPayload, linkFormatter linkFormatter, withSender bool) (string, string, int) {
@@ -189,8 +220,41 @@ func getIssueCommentPayloadInfo(p *api.IssueCommentPayload, linkFormatter linkFo
 		color = redColor
 	}
 	if withSender {
-		text += fmt.Sprintf(" by %s", linkFormatter(setting.AppURL+p.Sender.UserName, p.Sender.UserName))
+		text += fmt.Sprintf(" by %s", linkFormatter(setting.AppURL+url.PathEscape(p.Sender.UserName), p.Sender.UserName))
 	}
 
 	return text, issueTitle, color
+}
+
+// ToHook convert models.Webhook to api.Hook
+// This function is not part of the convert package to prevent an import cycle
+func ToHook(repoLink string, w *webhook_model.Webhook) (*api.Hook, error) {
+	config := map[string]string{
+		"url":          w.URL,
+		"content_type": w.ContentType.Name(),
+	}
+	if w.Type == webhook_module.SLACK {
+		s := GetSlackHook(w)
+		config["channel"] = s.Channel
+		config["username"] = s.Username
+		config["icon_url"] = s.IconURL
+		config["color"] = s.Color
+	}
+
+	authorizationHeader, err := w.HeaderAuthorization()
+	if err != nil {
+		return nil, err
+	}
+
+	return &api.Hook{
+		ID:                  w.ID,
+		Type:                w.Type,
+		URL:                 fmt.Sprintf("%s/settings/hooks/%d", repoLink, w.ID),
+		Active:              w.IsActive,
+		Config:              config,
+		Events:              w.EventsArray(),
+		AuthorizationHeader: authorizationHeader,
+		Updated:             w.UpdatedUnix.AsTime(),
+		Created:             w.CreatedUnix.AsTime(),
+	}, nil
 }

@@ -1,11 +1,10 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package oauth2_test
 
 import (
-	"code.gitea.io/gitea/models"
+	auth_model "code.gitea.io/gitea/models/auth"
 	"code.gitea.io/gitea/services/auth"
 	"code.gitea.io/gitea/services/auth/source/oauth2"
 )
@@ -14,9 +13,9 @@ import (
 // It tightly binds the interfaces and implementation without breaking go import cycles
 
 type sourceInterface interface {
-	models.LoginConfig
-	models.LoginSourceSettable
-	models.RegisterableSource
+	auth_model.Config
+	auth_model.SourceSettable
+	auth_model.RegisterableSource
 	auth.PasswordAuthenticator
 }
 

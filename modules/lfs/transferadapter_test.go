@@ -1,6 +1,5 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package lfs
 
@@ -8,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"strings"
 	"testing"
@@ -35,7 +33,7 @@ func TestBasicTransferAdapter(t *testing.T) {
 		if strings.Contains(url, "download-request") {
 			assert.Equal(t, "GET", req.Method)
 
-			return &http.Response{StatusCode: http.StatusOK, Body: ioutil.NopCloser(bytes.NewBufferString("dummy"))}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewBufferString("dummy"))}
 		} else if strings.Contains(url, "upload-request") {
 			assert.Equal(t, "PUT", req.Method)
 			assert.Equal(t, "application/octet-stream", req.Header.Get("Content-Type"))
@@ -63,7 +61,7 @@ func TestBasicTransferAdapter(t *testing.T) {
 			payload := new(bytes.Buffer)
 			json.NewEncoder(payload).Encode(er)
 
-			return &http.Response{StatusCode: http.StatusNotFound, Body: ioutil.NopCloser(payload)}
+			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(payload)}
 		} else {
 			t.Errorf("Unknown test case: %s", url)
 			return nil

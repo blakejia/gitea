@@ -1,6 +1,5 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package validation
 
@@ -10,7 +9,7 @@ import (
 	"testing"
 
 	"gitea.com/go-chi/binding"
-	"github.com/go-chi/chi"
+	chi "github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 )
 

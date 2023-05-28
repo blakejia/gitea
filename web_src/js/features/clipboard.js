@@ -1,38 +1,34 @@
-const selector = '[data-clipboard-target], [data-clipboard-text]';
+import {showTemporaryTooltip} from '../modules/tippy.js';
+import {toAbsoluteUrl} from '../utils.js';
+import {clippie} from 'clippie';
 
-// TODO: replace these with toast-style notifications
-function onSuccess(btn) {
-  if (!btn.dataset.content) return;
-  $(btn).popup('destroy');
-  btn.dataset.content = btn.dataset.success;
-  $(btn).popup('show');
-  btn.dataset.content = btn.dataset.original;
-}
-function onError(btn) {
-  if (!btn.dataset.content) return;
-  $(btn).popup('destroy');
-  btn.dataset.content = btn.dataset.error;
-  $(btn).popup('show');
-  btn.dataset.content = btn.dataset.original;
-}
+const {copy_success, copy_error} = window.config.i18n;
 
-export default async function initClipboard() {
-  for (const btn of document.querySelectorAll(selector) || []) {
-    btn.addEventListener('click', async () => {
-      let text;
-      if (btn.dataset.clipboardText) {
-        text = btn.dataset.clipboardText;
-      } else if (btn.dataset.clipboardTarget) {
-        text = document.querySelector(btn.dataset.clipboardTarget)?.value;
+// For all DOM elements with [data-clipboard-target] or [data-clipboard-text],
+// this copy-to-clipboard will work for them
+export function initGlobalCopyToClipboardListener() {
+  document.addEventListener('click', (e) => {
+    let target = e.target;
+    // in case <button data-clipboard-text><svg></button>, so we just search
+    // up to 3 levels for performance
+    for (let i = 0; i < 3 && target; i++) {
+      let txt = target.getAttribute('data-clipboard-text');
+      if (txt && target.getAttribute('data-clipboard-text-type') === 'url') {
+        txt = toAbsoluteUrl(txt);
       }
-      if (!text) return;
+      const text = txt || document.querySelector(target.getAttribute('data-clipboard-target'))?.value;
 
-      try {
-        await navigator.clipboard.writeText(text);
-        onSuccess(btn);
-      } catch {
-        onError(btn);
+      if (text) {
+        e.preventDefault();
+
+        (async() => {
+          const success = await clippie(text);
+          showTemporaryTooltip(target, success ? copy_success : copy_error);
+        })();
+
+        break;
       }
-    });
-  }
+      target = target.parentElement;
+    }
+  });
 }

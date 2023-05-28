@@ -1,41 +1,37 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package oauth2
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
 	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"code.gitea.io/gitea/modules/generate"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/util"
 
-	"github.com/golang-jwt/jwt"
-	ini "gopkg.in/ini.v1"
+	"github.com/golang-jwt/jwt/v4"
 )
 
 // ErrInvalidAlgorithmType represents an invalid algorithm error.
 type ErrInvalidAlgorithmType struct {
-	Algorightm string
+	Algorithm string
 }
 
 func (err ErrInvalidAlgorithmType) Error() string {
-	return fmt.Sprintf("JWT signing algorithm is not supported: %s", err.Algorightm)
+	return fmt.Sprintf("JWT signing algorithm is not supported: %s", err.Algorithm)
 }
 
 // JWTSigningKey represents a algorithm/key pair to sign JWTs
@@ -85,7 +81,7 @@ type rsaSingingKey struct {
 }
 
 func newRSASingingKey(signingMethod jwt.SigningMethod, key *rsa.PrivateKey) (rsaSingingKey, error) {
-	kid, err := createPublicKeyFingerprint(key.Public().(*rsa.PublicKey))
+	kid, err := util.CreatePublicKeyFingerprint(key.Public().(*rsa.PublicKey))
 	if err != nil {
 		return rsaSingingKey{}, err
 	}
@@ -129,6 +125,57 @@ func (key rsaSingingKey) PreProcessToken(token *jwt.Token) {
 	token.Header["kid"] = key.id
 }
 
+type eddsaSigningKey struct {
+	signingMethod jwt.SigningMethod
+	key           ed25519.PrivateKey
+	id            string
+}
+
+func newEdDSASingingKey(signingMethod jwt.SigningMethod, key ed25519.PrivateKey) (eddsaSigningKey, error) {
+	kid, err := util.CreatePublicKeyFingerprint(key.Public().(ed25519.PublicKey))
+	if err != nil {
+		return eddsaSigningKey{}, err
+	}
+
+	return eddsaSigningKey{
+		signingMethod,
+		key,
+		base64.RawURLEncoding.EncodeToString(kid),
+	}, nil
+}
+
+func (key eddsaSigningKey) IsSymmetric() bool {
+	return false
+}
+
+func (key eddsaSigningKey) SigningMethod() jwt.SigningMethod {
+	return key.signingMethod
+}
+
+func (key eddsaSigningKey) SignKey() interface{} {
+	return key.key
+}
+
+func (key eddsaSigningKey) VerifyKey() interface{} {
+	return key.key.Public()
+}
+
+func (key eddsaSigningKey) ToJWK() (map[string]string, error) {
+	pubKey := key.key.Public().(ed25519.PublicKey)
+
+	return map[string]string{
+		"alg": key.SigningMethod().Alg(),
+		"kid": key.id,
+		"kty": "OKP",
+		"crv": "Ed25519",
+		"x":   base64.RawURLEncoding.EncodeToString(pubKey),
+	}, nil
+}
+
+func (key eddsaSigningKey) PreProcessToken(token *jwt.Token) {
+	token.Header["kid"] = key.id
+}
+
 type ecdsaSingingKey struct {
 	signingMethod jwt.SigningMethod
 	key           *ecdsa.PrivateKey
@@ -136,7 +183,7 @@ type ecdsaSingingKey struct {
 }
 
 func newECDSASingingKey(signingMethod jwt.SigningMethod, key *ecdsa.PrivateKey) (ecdsaSingingKey, error) {
-	kid, err := createPublicKeyFingerprint(key.Public().(*ecdsa.PublicKey))
+	kid, err := util.CreatePublicKeyFingerprint(key.Public().(*ecdsa.PublicKey))
 	if err != nil {
 		return ecdsaSingingKey{}, err
 	}
@@ -181,21 +228,8 @@ func (key ecdsaSingingKey) PreProcessToken(token *jwt.Token) {
 	token.Header["kid"] = key.id
 }
 
-// createPublicKeyFingerprint creates a fingerprint of the given key.
-// The fingerprint is the sha256 sum of the PKIX structure of the key.
-func createPublicKeyFingerprint(key interface{}) ([]byte, error) {
-	bytes, err := x509.MarshalPKIXPublicKey(key)
-	if err != nil {
-		return nil, err
-	}
-
-	checksum := sha256.Sum256(bytes)
-
-	return checksum[:], nil
-}
-
-// CreateJWTSingingKey creates a signing key from an algorithm / key pair.
-func CreateJWTSingingKey(algorithm string, key interface{}) (JWTSigningKey, error) {
+// CreateJWTSigningKey creates a signing key from an algorithm / key pair.
+func CreateJWTSigningKey(algorithm string, key interface{}) (JWTSigningKey, error) {
 	var signingMethod jwt.SigningMethod
 	switch algorithm {
 	case "HS256":
@@ -218,11 +252,19 @@ func CreateJWTSingingKey(algorithm string, key interface{}) (JWTSigningKey, erro
 		signingMethod = jwt.SigningMethodES384
 	case "ES512":
 		signingMethod = jwt.SigningMethodES512
+	case "EdDSA":
+		signingMethod = jwt.SigningMethodEdDSA
 	default:
 		return nil, ErrInvalidAlgorithmType{algorithm}
 	}
 
 	switch signingMethod.(type) {
+	case *jwt.SigningMethodEd25519:
+		privateKey, ok := key.(ed25519.PrivateKey)
+		if !ok {
+			return nil, jwt.ErrInvalidKeyType
+		}
+		return newEdDSASingingKey(signingMethod, privateKey)
 	case *jwt.SigningMethodECDSA:
 		privateKey, ok := key.(*ecdsa.PrivateKey)
 		if !ok {
@@ -258,8 +300,7 @@ func InitSigningKey() error {
 	case "HS384":
 		fallthrough
 	case "HS512":
-		key, err = loadOrCreateSymmetricKey()
-
+		key, err = loadSymmetricKey()
 	case "RS256":
 		fallthrough
 	case "RS384":
@@ -271,17 +312,18 @@ func InitSigningKey() error {
 	case "ES384":
 		fallthrough
 	case "ES512":
+		fallthrough
+	case "EdDSA":
 		key, err = loadOrCreateAsymmetricKey()
-
 	default:
 		return ErrInvalidAlgorithmType{setting.OAuth2.JWTSigningAlgorithm}
 	}
 
 	if err != nil {
-		return fmt.Errorf("Error while loading or creating symmetric key: %v", err)
+		return fmt.Errorf("Error while loading or creating JWT key: %w", err)
 	}
 
-	signingKey, err := CreateJWTSingingKey(setting.OAuth2.JWTSigningAlgorithm, key)
+	signingKey, err := CreateJWTSigningKey(setting.OAuth2.JWTSigningAlgorithm, key)
 	if err != nil {
 		return err
 	}
@@ -291,22 +333,16 @@ func InitSigningKey() error {
 	return nil
 }
 
-// loadOrCreateSymmetricKey checks if the configured secret is valid.
-// If it is not valid a new secret is created and saved in the configuration file.
-func loadOrCreateSymmetricKey() (interface{}, error) {
+// loadSymmetricKey checks if the configured secret is valid.
+// If it is not valid, it will return an error.
+func loadSymmetricKey() (interface{}, error) {
 	key := make([]byte, 32)
 	n, err := base64.RawURLEncoding.Decode(key, []byte(setting.OAuth2.JWTSecretBase64))
-	if err != nil || n != 32 {
-		key, err = generate.NewJwtSecret()
-		if err != nil {
-			log.Fatal("error generating JWT secret: %v", err)
-			return nil, err
-		}
-
-		setting.CreateOrAppendToCustomConf(func(cfg *ini.File) {
-			secretBase64 := base64.RawURLEncoding.EncodeToString(key)
-			cfg.Section("oauth2").Key("JWT_SECRET").SetValue(secretBase64)
-		})
+	if err != nil {
+		return nil, err
+	}
+	if n != 32 {
+		return nil, fmt.Errorf("JWT secret must be 32 bytes long")
 	}
 
 	return key, nil
@@ -324,10 +360,15 @@ func loadOrCreateAsymmetricKey() (interface{}, error) {
 	if !isExist {
 		err := func() error {
 			key, err := func() (interface{}, error) {
-				if strings.HasPrefix(setting.OAuth2.JWTSigningAlgorithm, "RS") {
+				switch {
+				case strings.HasPrefix(setting.OAuth2.JWTSigningAlgorithm, "RS"):
 					return rsa.GenerateKey(rand.Reader, 4096)
+				case setting.OAuth2.JWTSigningAlgorithm == "EdDSA":
+					_, pk, err := ed25519.GenerateKey(rand.Reader)
+					return pk, err
+				default:
+					return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 				}
-				return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 			}()
 			if err != nil {
 				return err
@@ -344,7 +385,7 @@ func loadOrCreateAsymmetricKey() (interface{}, error) {
 				return err
 			}
 
-			f, err := os.OpenFile(keyPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+			f, err := os.OpenFile(keyPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 			if err != nil {
 				return err
 			}
@@ -362,7 +403,7 @@ func loadOrCreateAsymmetricKey() (interface{}, error) {
 		}
 	}
 
-	bytes, err := ioutil.ReadFile(keyPath)
+	bytes, err := os.ReadFile(keyPath)
 	if err != nil {
 		return nil, err
 	}

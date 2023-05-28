@@ -1,9 +1,9 @@
 <template>
-  <div>
+  <div ref="root">
     <div v-if="loading" class="ui active centered inline loader"/>
     <div v-if="!loading && issue !== null">
       <p><small>{{ issue.repository.full_name }} on {{ createdAt }}</small></p>
-      <p><svg-icon :name="icon" :class="[color]" /> <strong>{{ issue.title }}</strong> #{{ issue.number }}</p>
+      <p><svg-icon :name="icon" :class="['text', color]" /> <strong>{{ issue.title }}</strong> #{{ issue.number }}</p>
       <p>{{ body }}</p>
       <div>
         <div
@@ -16,26 +16,28 @@
         </div>
       </div>
     </div>
+    <div v-if="!loading && issue === null">
+      <p><small>{{ i18nErrorOccurred }}</small></p>
+      <p>{{ i18nErrorMessage }}</p>
+    </div>
   </div>
 </template>
 
 <script>
+import $ from 'jquery';
 import {SvgIcon} from '../svg.js';
+import {useLightTextOnBackground, hexToRGBColor} from '../utils/color.js';
 
-const {AppSubUrl} = window.config;
+const {appSubUrl, i18n} = window.config;
 
 export default {
-  name: 'ContextPopup',
-
-  components: {
-    SvgIcon,
-  },
-
+  components: {SvgIcon},
   data: () => ({
     loading: false,
-    issue: null
+    issue: null,
+    i18nErrorOccurred: i18n.error_occurred,
+    i18nErrorMessage: null,
   }),
-
   computed: {
     createdAt() {
       return new Date(this.issue.created_at).toLocaleDateString(undefined, {year: 'numeric', month: 'short', day: 'numeric'});
@@ -74,37 +76,39 @@ export default {
 
     labels() {
       return this.issue.labels.map((label) => {
-        const red = parseInt(label.color.substring(0, 2), 16);
-        const green = parseInt(label.color.substring(2, 4), 16);
-        const blue = parseInt(label.color.substring(4, 6), 16);
-        let color = '#ffffff';
-        if ((red * 0.299 + green * 0.587 + blue * 0.114) > 125) {
-          color = '#000000';
+        let textColor;
+        const [r, g, b] = hexToRGBColor(label.color);
+        if (useLightTextOnBackground(r, g, b)) {
+          textColor = '#eeeeee';
+        } else {
+          textColor = '#111111';
         }
-        return {name: label.name, color: `#${label.color}`, textColor: color};
+        return {name: label.name, color: `#${label.color}`, textColor};
       });
     }
   },
-
   mounted() {
-    this.$root.$on('load-context-popup', (data, callback) => {
+    this.$refs.root.addEventListener('ce-load-context-popup', (e) => {
+      const data = e.detail;
       if (!this.loading && this.issue === null) {
-        this.load(data, callback);
+        this.load(data);
       }
     });
   },
-
   methods: {
-    load(data, callback) {
+    load(data) {
       this.loading = true;
-      $.get(`${AppSubUrl}/api/v1/repos/${data.owner}/${data.repo}/issues/${data.index}`, (issue) => {
+      this.i18nErrorMessage = null;
+      $.get(`${appSubUrl}/${data.owner}/${data.repo}/issues/${data.index}/info`).done((issue) => {
         this.issue = issue;
+      }).fail((jqXHR) => {
+        if (jqXHR.responseJSON && jqXHR.responseJSON.message) {
+          this.i18nErrorMessage = jqXHR.responseJSON.message;
+        } else {
+          this.i18nErrorMessage = i18n.network_error;
+        }
+      }).always(() => {
         this.loading = false;
-        this.$nextTick(() => {
-          if (callback) {
-            callback();
-          }
-        });
       });
     }
   }

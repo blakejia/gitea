@@ -1,6 +1,5 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package oauth2
 
@@ -31,7 +30,10 @@ type SimpleProvider struct {
 
 // CreateGothProvider creates a GothProvider from this Provider
 func (c *SimpleProvider) CreateGothProvider(providerName, callbackURL string, source *Source) (goth.Provider, error) {
-	return c.newFn(source.ClientID, source.ClientSecret, callbackURL, c.scopes...), nil
+	scopes := make([]string, len(c.scopes)+len(source.Scopes))
+	copy(scopes, c.scopes)
+	copy(scopes[len(c.scopes):], source.Scopes)
+	return c.newFn(source.ClientID, source.ClientSecret, callbackURL, scopes...), nil
 }
 
 // NewSimpleProvider is a constructor function for simple providers
@@ -67,13 +69,13 @@ func init() {
 		}))
 
 	// named gplus due to legacy gplus -> google migration (Google killed Google+). This ensures old connections still work
-	RegisterGothProvider(NewSimpleProvider("gplus", "Google", []string{"email"},
+	RegisterGothProvider(NewImagedProvider("/assets/img/auth/google.png", NewSimpleProvider("gplus", "Google", []string{"email"},
 		func(clientKey, secret, callbackURL string, scopes ...string) goth.Provider {
 			if setting.OAuth2Client.UpdateAvatar || setting.OAuth2Client.EnableAutoRegistration {
 				scopes = append(scopes, "profile")
 			}
 			return google.New(clientKey, secret, callbackURL, scopes...)
-		}))
+		})))
 
 	RegisterGothProvider(NewSimpleProvider("twitter", "Twitter", nil,
 		func(clientKey, secret, callbackURL string, scopes ...string) goth.Provider {
@@ -104,5 +106,4 @@ func init() {
 			return microsoftonline.New(clientID, secret, callbackURL, scopes...)
 		},
 	))
-
 }

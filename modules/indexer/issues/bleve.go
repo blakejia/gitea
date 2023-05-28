@@ -1,10 +1,10 @@
 // Copyright 2018 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package issues
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -15,6 +15,7 @@ import (
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/custom"
+	"github.com/blevesearch/bleve/v2/analysis/token/camelcase"
 	"github.com/blevesearch/bleve/v2/analysis/token/lowercase"
 	"github.com/blevesearch/bleve/v2/analysis/token/unicodenorm"
 	"github.com/blevesearch/bleve/v2/analysis/tokenizer/unicode"
@@ -27,7 +28,7 @@ import (
 const (
 	issueIndexerAnalyzer      = "issueIndexer"
 	issueIndexerDocType       = "issueIndexerDocType"
-	issueIndexerLatestVersion = 1
+	issueIndexerLatestVersion = 2
 )
 
 // indexerID a bleve-compatible unique identifier for an integer id
@@ -39,7 +40,7 @@ func indexerID(id int64) string {
 func idOfIndexerID(indexerID string) (int64, error) {
 	id, err := strconv.ParseInt(indexerID, 36, 64)
 	if err != nil {
-		return 0, fmt.Errorf("Unexpected indexer ID %s: %v", indexerID, err)
+		return 0, fmt.Errorf("Unexpected indexer ID %s: %w", indexerID, err)
 	}
 	return id, nil
 }
@@ -134,7 +135,7 @@ func createIssueIndexer(path string, latestVersion int) (bleve.Index, error) {
 		"type":          custom.Name,
 		"char_filters":  []string{},
 		"tokenizer":     unicode.Name,
-		"token_filters": []string{unicodeNormalizeName, lowercase.Name},
+		"token_filters": []string{unicodeNormalizeName, camelcase.Name, lowercase.Name},
 	}); err != nil {
 		return nil, err
 	}
@@ -156,9 +157,7 @@ func createIssueIndexer(path string, latestVersion int) (bleve.Index, error) {
 	return index, nil
 }
 
-var (
-	_ Indexer = &BleveIndexer{}
-)
+var _ Indexer = &BleveIndexer{}
 
 // BleveIndexer implements Indexer interface
 type BleveIndexer struct {
@@ -186,6 +185,11 @@ func (b *BleveIndexer) Init() (bool, error) {
 
 	b.indexer, err = createIssueIndexer(b.indexDir, issueIndexerLatestVersion)
 	return false, err
+}
+
+// Ping does nothing
+func (b *BleveIndexer) Ping() bool {
+	return true
 }
 
 // Close will close the bleve indexer
@@ -231,7 +235,7 @@ func (b *BleveIndexer) Delete(ids ...int64) error {
 
 // Search searches for issues by given conditions.
 // Returns the matching issue IDs
-func (b *BleveIndexer) Search(keyword string, repoIDs []int64, limit, start int) (*SearchResult, error) {
+func (b *BleveIndexer) Search(ctx context.Context, keyword string, repoIDs []int64, limit, start int) (*SearchResult, error) {
 	var repoQueriesP []*query.NumericRangeQuery
 	for _, repoID := range repoIDs {
 		repoQueriesP = append(repoQueriesP, numericEqualityQuery(repoID, "RepoID"))
@@ -251,12 +255,12 @@ func (b *BleveIndexer) Search(keyword string, repoIDs []int64, limit, start int)
 	search := bleve.NewSearchRequestOptions(indexerQuery, limit, start, false)
 	search.SortBy([]string{"-_score"})
 
-	result, err := b.indexer.Search(search)
+	result, err := b.indexer.SearchInContext(ctx, search)
 	if err != nil {
 		return nil, err
 	}
 
-	var ret = SearchResult{
+	ret := SearchResult{
 		Hits: make([]Match, 0, len(result.Hits)),
 	}
 	for _, hit := range result.Hits {

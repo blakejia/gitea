@@ -1,6 +1,5 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package admin
 
@@ -8,11 +7,11 @@ import (
 	"net/http"
 
 	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/cron"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/structs"
 	"code.gitea.io/gitea/modules/util"
 	"code.gitea.io/gitea/routers/api/v1/utils"
+	"code.gitea.io/gitea/services/cron"
 )
 
 // ListCronTasks api for getting cron tasks
@@ -81,7 +80,7 @@ func PostCronTask(ctx *context.APIContext) {
 		return
 	}
 	task.Run()
-	log.Trace("Cron Task %s started by admin(%s)", task.Name, ctx.User.Name)
+	log.Trace("Cron Task %s started by admin(%s)", task.Name, ctx.Doer.Name)
 
 	ctx.Status(http.StatusNoContent)
 }

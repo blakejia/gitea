@@ -1,21 +1,27 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package user
 
 import (
 	"net/http"
+	"strconv"
 
-	"code.gitea.io/gitea/models"
+	admin_model "code.gitea.io/gitea/models/admin"
 	"code.gitea.io/gitea/modules/context"
 	"code.gitea.io/gitea/modules/json"
 )
 
 // TaskStatus returns task's status
 func TaskStatus(ctx *context.Context) {
-	task, opts, err := models.GetMigratingTaskByID(ctx.ParamsInt64("task"), ctx.User.ID)
+	task, opts, err := admin_model.GetMigratingTaskByID(ctx.ParamsInt64("task"), ctx.Doer.ID)
 	if err != nil {
+		if admin_model.IsErrTaskDoesNotExist(err) {
+			ctx.JSON(http.StatusNotFound, map[string]interface{}{
+				"error": "task `" + strconv.FormatInt(ctx.ParamsInt64("task"), 10) + "` does not exist",
+			})
+			return
+		}
 		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"err": err,
 		})
@@ -26,9 +32,9 @@ func TaskStatus(ctx *context.Context) {
 
 	if task.Message != "" && task.Message[0] == '{' {
 		// assume message is actually a translatable string
-		var translatableMessage models.TranslatableMessage
+		var translatableMessage admin_model.TranslatableMessage
 		if err := json.Unmarshal([]byte(message), &translatableMessage); err != nil {
-			translatableMessage = models.TranslatableMessage{
+			translatableMessage = admin_model.TranslatableMessage{
 				Format: "migrate.migrating_failed.error",
 				Args:   []interface{}{task.Message},
 			}

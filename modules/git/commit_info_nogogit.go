@@ -1,8 +1,7 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
-// +build !gogit
+//go:build !gogit
 
 package git
 
@@ -17,7 +16,7 @@ import (
 )
 
 // GetCommitsInfo gets information of all commits that are corresponding to these entries
-func (tes Entries) GetCommitsInfo(ctx context.Context, commit *Commit, treePath string, cache *LastCommitCache) ([]CommitInfo, *Commit, error) {
+func (tes Entries) GetCommitsInfo(ctx context.Context, commit *Commit, treePath string) ([]CommitInfo, *Commit, error) {
 	entryPaths := make([]string, len(tes)+1)
 	// Get the commit for the treePath itself
 	entryPaths[0] = ""
@@ -28,9 +27,9 @@ func (tes Entries) GetCommitsInfo(ctx context.Context, commit *Commit, treePath 
 	var err error
 
 	var revs map[string]*Commit
-	if cache != nil {
+	if commit.repo.LastCommitCache != nil {
 		var unHitPaths []string
-		revs, unHitPaths, err = getLastCommitForPathsByCache(ctx, commit.ID.String(), treePath, entryPaths, cache)
+		revs, unHitPaths, err = getLastCommitForPathsByCache(ctx, commit.ID.String(), treePath, entryPaths, commit.repo.LastCommitCache)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -42,9 +41,6 @@ func (tes Entries) GetCommitsInfo(ctx context.Context, commit *Commit, treePath 
 			}
 
 			for pth, found := range commits {
-				if err := cache.Put(commit.ID.String(), path.Join(treePath, pth), found.ID.String()); err != nil {
-					return nil, nil, err
-				}
 				revs[pth] = found
 			}
 		}
@@ -61,26 +57,30 @@ func (tes Entries) GetCommitsInfo(ctx context.Context, commit *Commit, treePath 
 		commitsInfo[i] = CommitInfo{
 			Entry: entry,
 		}
+
+		// Check if we have found a commit for this entry in time
 		if entryCommit, ok := revs[entry.Name()]; ok {
 			commitsInfo[i].Commit = entryCommit
-			if entry.IsSubModule() {
-				subModuleURL := ""
-				var fullPath string
-				if len(treePath) > 0 {
-					fullPath = treePath + "/" + entry.Name()
-				} else {
-					fullPath = entry.Name()
-				}
-				if subModule, err := commit.GetSubModule(fullPath); err != nil {
-					return nil, nil, err
-				} else if subModule != nil {
-					subModuleURL = subModule.URL
-				}
-				subModuleFile := NewSubModuleFile(entryCommit, subModuleURL, entry.ID.String())
-				commitsInfo[i].SubModuleFile = subModuleFile
-			}
 		} else {
 			log.Debug("missing commit for %s", entry.Name())
+		}
+
+		// If the entry if a submodule add a submodule file for this
+		if entry.IsSubModule() {
+			subModuleURL := ""
+			var fullPath string
+			if len(treePath) > 0 {
+				fullPath = treePath + "/" + entry.Name()
+			} else {
+				fullPath = entry.Name()
+			}
+			if subModule, err := commit.GetSubModule(fullPath); err != nil {
+				return nil, nil, err
+			} else if subModule != nil {
+				subModuleURL = subModule.URL
+			}
+			subModuleFile := NewSubModuleFile(commitsInfo[i].Commit, subModuleURL, entry.ID.String())
+			commitsInfo[i].SubModuleFile = subModuleFile
 		}
 	}
 
@@ -98,18 +98,15 @@ func (tes Entries) GetCommitsInfo(ctx context.Context, commit *Commit, treePath 
 }
 
 func getLastCommitForPathsByCache(ctx context.Context, commitID, treePath string, paths []string, cache *LastCommitCache) (map[string]*Commit, []string, error) {
-	wr, rd, cancel := cache.repo.CatFileBatch()
-	defer cancel()
-
 	var unHitEntryPaths []string
-	var results = make(map[string]*Commit)
+	results := make(map[string]*Commit)
 	for _, p := range paths {
-		lastCommit, err := cache.Get(commitID, path.Join(treePath, p), wr, rd)
+		lastCommit, err := cache.Get(commitID, path.Join(treePath, p))
 		if err != nil {
 			return nil, nil, err
 		}
 		if lastCommit != nil {
-			results[p] = lastCommit.(*Commit)
+			results[p] = lastCommit
 			continue
 		}
 
@@ -127,7 +124,7 @@ func GetLastCommitForPaths(ctx context.Context, commit *Commit, treePath string,
 		return nil, err
 	}
 
-	batchStdinWriter, batchReader, cancel := commit.repo.CatFileBatch()
+	batchStdinWriter, batchReader, cancel := commit.repo.CatFileBatch(ctx)
 	defer cancel()
 
 	commitsMap := map[string]*Commit{}
@@ -156,7 +153,7 @@ func GetLastCommitForPaths(ctx context.Context, commit *Commit, treePath string,
 		if typ != "commit" {
 			return nil, fmt.Errorf("unexpected type: %s for commit id: %s", typ, commitID)
 		}
-		c, err = CommitFromReader(commit.repo, MustIDFromString(string(commitID)), io.LimitReader(batchReader, int64(size)))
+		c, err = CommitFromReader(commit.repo, MustIDFromString(commitID), io.LimitReader(batchReader, size))
 		if err != nil {
 			return nil, err
 		}

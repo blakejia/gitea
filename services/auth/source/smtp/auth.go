@@ -1,18 +1,16 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package smtp
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/smtp"
 	"os"
 	"strconv"
-
-	"code.gitea.io/gitea/models"
 )
 
 //   _________   __________________________
@@ -51,6 +49,9 @@ const (
 
 // Authenticators contains available SMTP authentication type names.
 var Authenticators = []string{PlainAuthentication, LoginAuthentication, CRAMMD5Authentication}
+
+// ErrUnsupportedLoginType login source is unknown error
+var ErrUnsupportedLoginType = errors.New("Login source is unknown")
 
 // Authenticate performs an SMTP authentication.
 func Authenticate(a smtp.Auth, source *Source) error {
@@ -93,7 +94,7 @@ func Authenticate(a smtp.Auth, source *Source) error {
 	hasStartTLS, _ := client.Extension("STARTTLS")
 	if !source.UseTLS() && hasStartTLS {
 		if err = client.StartTLS(tlsConfig); err != nil {
-			return fmt.Errorf("failed to start StartTLS: %v", err)
+			return fmt.Errorf("failed to start StartTLS: %w", err)
 		}
 	}
 
@@ -101,5 +102,5 @@ func Authenticate(a smtp.Auth, source *Source) error {
 		return client.Auth(a)
 	}
 
-	return models.ErrUnsupportedLoginType
+	return ErrUnsupportedLoginType
 }

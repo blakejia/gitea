@@ -1,13 +1,11 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package markup
 
 import (
 	"bytes"
 	"io"
-	"io/ioutil"
 	"net/url"
 	"path"
 	"path/filepath"
@@ -21,10 +19,12 @@ import (
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/markup/common"
 	"code.gitea.io/gitea/modules/references"
+	"code.gitea.io/gitea/modules/regexplru"
 	"code.gitea.io/gitea/modules/setting"
+	"code.gitea.io/gitea/modules/templates/vars"
+	"code.gitea.io/gitea/modules/translation"
 	"code.gitea.io/gitea/modules/util"
 
-	"github.com/unknwon/com"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 	"mvdan.cc/xurls/v2"
@@ -34,6 +34,7 @@ import (
 const (
 	IssueNameStyleNumeric      = "numeric"
 	IssueNameStyleAlphanumeric = "alphanumeric"
+	IssueNameStyleRegexp       = "regexp"
 )
 
 var (
@@ -42,16 +43,21 @@ var (
 	// While fast, this is also incorrect and lead to false positives.
 	// TODO: fix invalid linking issue
 
+	// valid chars in encoded path and parameter: [-+~_%.a-zA-Z0-9/]
+
 	// sha1CurrentPattern matches string that represents a commit SHA, e.g. d8a994ef243349f321568f9e36d5c3f444b99cae
 	// Although SHA1 hashes are 40 chars long, the regex matches the hash from 7 to 40 chars in length
-	// so that abbreviated hash links can be used as well. This matches git and github useability.
+	// so that abbreviated hash links can be used as well. This matches git and GitHub usability.
 	sha1CurrentPattern = regexp.MustCompile(`(?:\s|^|\(|\[)([0-9a-f]{7,40})(?:\s|$|\)|\]|[.,](\s|$))`)
 
 	// shortLinkPattern matches short but difficult to parse [[name|link|arg=test]] syntax
 	shortLinkPattern = regexp.MustCompile(`\[\[(.*?)\]\](\w*)`)
 
-	// anySHA1Pattern allows to split url containing SHA into parts
-	anySHA1Pattern = regexp.MustCompile(`https?://(?:\S+/){4}([0-9a-f]{40})(/[^#\s]+)?(#\S+)?`)
+	// anySHA1Pattern splits url containing SHA into parts
+	anySHA1Pattern = regexp.MustCompile(`https?://(?:\S+/){4,5}([0-9a-f]{40})(/[-+~_%.a-zA-Z0-9/]+)?(#[-+~_%.a-zA-Z0-9]+)?`)
+
+	// comparePattern matches "http://domain/org/repo/compare/COMMIT1...COMMIT2#hash"
+	comparePattern = regexp.MustCompile(`https?://(?:\S+/){4,5}([0-9a-f]{7,40})(\.\.\.?)([0-9a-f]{7,40})?(#[-+~_%.a-zA-Z0-9]+)?`)
 
 	validLinksPattern = regexp.MustCompile(`^[a-z][\w-]+://`)
 
@@ -66,7 +72,7 @@ var (
 	blackfridayExtRegex = regexp.MustCompile(`[^:]*:user-content-`)
 
 	// EmojiShortCodeRegex find emoji by alias like :smile:
-	EmojiShortCodeRegex = regexp.MustCompile(`:[\w\+\-]+:`)
+	EmojiShortCodeRegex = regexp.MustCompile(`:[-+\w]+:`)
 )
 
 // CSS class for action keywords (e.g. "closes: #1")
@@ -92,12 +98,28 @@ var issueFullPattern *regexp.Regexp
 // Once for to prevent races
 var issueFullPatternOnce sync.Once
 
+// regexp for full links to hash comment in pull request files changed tab
+var filesChangedFullPattern *regexp.Regexp
+
+// Once for to prevent races
+var filesChangedFullPatternOnce sync.Once
+
 func getIssueFullPattern() *regexp.Regexp {
 	issueFullPatternOnce.Do(func() {
+		// example: https://domain/org/repo/pulls/27#hash
 		issueFullPattern = regexp.MustCompile(regexp.QuoteMeta(setting.AppURL) +
-			`\w+/\w+/(?:issues|pulls)/((?:\w{1,10}-)?[1-9][0-9]*)([\?|#]\S+.(\S+)?)?\b`)
+			`[\w_.-]+/[\w_.-]+/(?:issues|pulls)/((?:\w{1,10}-)?[1-9][0-9]*)([\?|#](\S+)?)?\b`)
 	})
 	return issueFullPattern
+}
+
+func getFilesChangedFullPattern() *regexp.Regexp {
+	filesChangedFullPatternOnce.Do(func() {
+		// example: https://domain/org/repo/pulls/27/files#hash
+		filesChangedFullPattern = regexp.MustCompile(regexp.QuoteMeta(setting.AppURL) +
+			`[\w_.-]+/[\w_.-]+/pulls/((?:\w{1,10}-)?[1-9][0-9]*)/files([\?|#](\S+)?)?\b`)
+	})
+	return filesChangedFullPattern
 }
 
 // CustomLinkURLSchemes allows for additional schemes to be detected when parsing links within text
@@ -153,11 +175,13 @@ type processor func(ctx *RenderContext, node *html.Node)
 
 var defaultProcessors = []processor{
 	fullIssuePatternProcessor,
+	comparePatternProcessor,
 	fullSha1PatternProcessor,
 	shortLinkProcessor,
 	linkProcessor,
 	mentionProcessor,
 	issueIndexPatternProcessor,
+	commitCrossReferencePatternProcessor,
 	sha1CurrentPatternProcessor,
 	emailAddressProcessor,
 	emojiProcessor,
@@ -179,10 +203,12 @@ func PostProcess(
 
 var commitMessageProcessors = []processor{
 	fullIssuePatternProcessor,
+	comparePatternProcessor,
 	fullSha1PatternProcessor,
 	linkProcessor,
 	mentionProcessor,
 	issueIndexPatternProcessor,
+	commitCrossReferencePatternProcessor,
 	sha1CurrentPatternProcessor,
 	emailAddressProcessor,
 	emojiProcessor,
@@ -196,7 +222,7 @@ func RenderCommitMessage(
 	ctx *RenderContext,
 	content string,
 ) (string, error) {
-	var procs = commitMessageProcessors
+	procs := commitMessageProcessors
 	if ctx.DefaultLink != "" {
 		// we don't have to fear data races, because being
 		// commitMessageProcessors of fixed len and cap, every time we append
@@ -209,10 +235,12 @@ func RenderCommitMessage(
 
 var commitMessageSubjectProcessors = []processor{
 	fullIssuePatternProcessor,
+	comparePatternProcessor,
 	fullSha1PatternProcessor,
 	linkProcessor,
 	mentionProcessor,
 	issueIndexPatternProcessor,
+	commitCrossReferencePatternProcessor,
 	sha1CurrentPatternProcessor,
 	emojiShortCodeProcessor,
 	emojiProcessor,
@@ -231,7 +259,7 @@ func RenderCommitMessageSubject(
 	ctx *RenderContext,
 	content string,
 ) (string, error) {
-	var procs = commitMessageSubjectProcessors
+	procs := commitMessageSubjectProcessors
 	if ctx.DefaultLink != "" {
 		// we don't have to fear data races, because being
 		// commitMessageSubjectProcessors of fixed len and cap, every time we
@@ -249,6 +277,7 @@ func RenderIssueTitle(
 ) (string, error) {
 	return renderProcessString(ctx, []processor{
 		issueIndexPatternProcessor,
+		commitCrossReferencePatternProcessor,
 		sha1CurrentPatternProcessor,
 		emojiShortCodeProcessor,
 		emojiProcessor,
@@ -279,34 +308,34 @@ func RenderDescriptionHTML(
 // RenderEmoji for when we want to just process emoji and shortcodes
 // in various places it isn't already run through the normal markdown processor
 func RenderEmoji(
+	ctx *RenderContext,
 	content string,
 ) (string, error) {
-	return renderProcessString(&RenderContext{}, emojiProcessors, content)
+	return renderProcessString(ctx, emojiProcessors, content)
 }
 
-var tagCleaner = regexp.MustCompile(`<((?:/?\w+/\w+)|(?:/[\w ]+/)|(/?[hH][tT][mM][lL]\b)|(/?[hH][eE][aA][dD]\b))`)
-var nulCleaner = strings.NewReplacer("\000", "")
+var (
+	tagCleaner = regexp.MustCompile(`<((?:/?\w+/\w+)|(?:/[\w ]+/)|(/?[hH][tT][mM][lL]\b)|(/?[hH][eE][aA][dD]\b))`)
+	nulCleaner = strings.NewReplacer("\000", "")
+)
 
 func postProcess(ctx *RenderContext, procs []processor, input io.Reader, output io.Writer) error {
 	defer ctx.Cancel()
 	// FIXME: don't read all content to memory
-	rawHTML, err := ioutil.ReadAll(input)
+	rawHTML, err := io.ReadAll(input)
 	if err != nil {
 		return err
 	}
 
-	res := bytes.NewBuffer(make([]byte, 0, len(rawHTML)+50))
-	// prepend "<html><body>"
-	_, _ = res.WriteString("<html><body>")
-
-	// Strip out nuls - they're always invalid
-	_, _ = res.Write(tagCleaner.ReplaceAll([]byte(nulCleaner.Replace(string(rawHTML))), []byte("&lt;$1")))
-
-	// close the tags
-	_, _ = res.WriteString("</body></html>")
-
 	// parse the HTML
-	node, err := html.Parse(res)
+	node, err := html.Parse(io.MultiReader(
+		// prepend "<html><body>"
+		strings.NewReader("<html><body>"),
+		// Strip out nuls - they're always invalid
+		bytes.NewReader(tagCleaner.ReplaceAll([]byte(nulCleaner.Replace(string(rawHTML))), []byte("&lt;$1"))),
+		// close the tags
+		strings.NewReader("</body></html>"),
+	))
 	if err != nil {
 		return &postProcessError{"invalid HTML", err}
 	}
@@ -315,7 +344,7 @@ func postProcess(ctx *RenderContext, procs []processor, input io.Reader, output 
 		node = node.FirstChild
 	}
 
-	visitNode(ctx, procs, node, true)
+	visitNode(ctx, procs, procs, node)
 
 	newNodes := make([]*html.Node, 0, 5)
 
@@ -339,32 +368,36 @@ func postProcess(ctx *RenderContext, procs []processor, input io.Reader, output 
 
 	// Render everything to buf.
 	for _, node := range newNodes {
-		err = html.Render(output, node)
-		if err != nil {
+		if err := html.Render(output, node); err != nil {
 			return &postProcessError{"error rendering processed HTML", err}
 		}
 	}
 	return nil
 }
 
-func visitNode(ctx *RenderContext, procs []processor, node *html.Node, visitText bool) {
-	// Add user-content- to IDs if they don't already have them
+func visitNode(ctx *RenderContext, procs, textProcs []processor, node *html.Node) {
+	// Add user-content- to IDs and "#" links if they don't already have them
 	for idx, attr := range node.Attr {
-		if attr.Key == "id" && !(strings.HasPrefix(attr.Val, "user-content-") || blackfridayExtRegex.MatchString(attr.Val)) {
+		val := strings.TrimPrefix(attr.Val, "#")
+		notHasPrefix := !(strings.HasPrefix(val, "user-content-") || blackfridayExtRegex.MatchString(val))
+
+		if attr.Key == "id" && notHasPrefix {
 			node.Attr[idx].Val = "user-content-" + attr.Val
 		}
 
+		if attr.Key == "href" && strings.HasPrefix(attr.Val, "#") && notHasPrefix {
+			node.Attr[idx].Val = "#user-content-" + val
+		}
+
 		if attr.Key == "class" && attr.Val == "emoji" {
-			visitText = false
+			textProcs = nil
 		}
 	}
 
-	// We ignore code, pre and already generated links.
+	// We ignore code and pre.
 	switch node.Type {
 	case html.TextNode:
-		if visitText {
-			textNode(ctx, procs, node)
-		}
+		textNode(ctx, textProcs, node)
 	case html.ElementNode:
 		if node.Data == "img" {
 			for i, attr := range node.Attr {
@@ -380,10 +413,12 @@ func visitNode(ctx *RenderContext, procs []processor, node *html.Node, visitText
 
 					attr.Val = util.URLJoin(prefix, attr.Val)
 				}
+				attr.Val = camoHandleLink(attr.Val)
 				node.Attr[i] = attr
 			}
 		} else if node.Data == "a" {
-			visitText = false
+			// Restrict text in links to emojis
+			textProcs = emojiProcessors
 		} else if node.Data == "code" || node.Data == "pre" {
 			return
 		} else if node.Data == "i" {
@@ -409,7 +444,7 @@ func visitNode(ctx *RenderContext, procs []processor, node *html.Node, visitText
 			}
 		}
 		for n := node.FirstChild; n != nil; n = n.NextSibling {
-			visitNode(ctx, procs, n, visitText)
+			visitNode(ctx, procs, textProcs, n)
 		}
 	}
 	// ignore everything else
@@ -593,8 +628,14 @@ func mentionProcessor(ctx *RenderContext, node *html.Node) {
 			start = loc.End
 			continue
 		}
-		replaceContent(node, loc.Start, loc.End, createLink(util.URLJoin(setting.AppURL, mention[1:]), mention, "mention"))
-		node = node.NextSibling.NextSibling
+		mentionedUsername := mention[1:]
+
+		if DefaultProcessorHelper.IsUsernameMentionable != nil && DefaultProcessorHelper.IsUsernameMentionable(ctx.Ctx, mentionedUsername) {
+			replaceContent(node, loc.Start, loc.End, createLink(util.URLJoin(setting.AppURL, mentionedUsername), mention, "mention"))
+			node = node.NextSibling.NextSibling
+		} else {
+			node = node.NextSibling
+		}
 		start = 0
 	}
 }
@@ -769,15 +810,30 @@ func fullIssuePatternProcessor(ctx *RenderContext, node *html.Node) {
 	if ctx.Metas == nil {
 		return
 	}
-
 	next := node.NextSibling
 	for node != nil && node != next {
 		m := getIssueFullPattern().FindStringSubmatchIndex(node.Data)
 		if m == nil {
 			return
 		}
+
+		mDiffView := getFilesChangedFullPattern().FindStringSubmatchIndex(node.Data)
+		// leave it as it is if the link is from "Files Changed" tab in PR Diff View https://domain/org/repo/pulls/27/files
+		if mDiffView != nil {
+			return
+		}
+
 		link := node.Data[m[0]:m[1]]
-		id := "#" + node.Data[m[2]:m[3]]
+		text := "#" + node.Data[m[2]:m[3]]
+		// if m[4] and m[5] is not -1, then link is to a comment
+		// indicate that in the text by appending (comment)
+		if m[4] != -1 && m[5] != -1 {
+			if locale, ok := ctx.Ctx.Value(translation.ContextKey).(translation.Locale); ok {
+				text += " " + locale.Tr("repo.from_comment")
+			} else {
+				text += " (comment)"
+			}
+		}
 
 		// extract repo and org name from matched link like
 		// http://localhost:3000/gituser/myrepo/issues/1
@@ -786,12 +842,10 @@ func fullIssuePatternProcessor(ctx *RenderContext, node *html.Node) {
 		matchRepo := linkParts[len(linkParts)-3]
 
 		if matchOrg == ctx.Metas["user"] && matchRepo == ctx.Metas["repo"] {
-			// TODO if m[4]:m[5] is not nil, then link is to a comment,
-			// and we should indicate that in the text somehow
-			replaceContent(node, m[0], m[1], createLink(link, id, "ref-issue"))
+			replaceContent(node, m[0], m[1], createLink(link, text, "ref-issue"))
 		} else {
-			orgRepoID := matchOrg + "/" + matchRepo + id
-			replaceContent(node, m[0], m[1], createLink(link, orgRepoID, "ref-issue"))
+			text = matchOrg + "/" + matchRepo + text
+			replaceContent(node, m[0], m[1], createLink(link, text, "ref-issue"))
 		}
 		node = node.NextSibling.NextSibling
 	}
@@ -807,19 +861,36 @@ func issueIndexPatternProcessor(ctx *RenderContext, node *html.Node) {
 	)
 
 	next := node.NextSibling
+
 	for node != nil && node != next {
-		_, exttrack := ctx.Metas["format"]
-		alphanum := ctx.Metas["style"] == IssueNameStyleAlphanumeric
+		_, hasExtTrackFormat := ctx.Metas["format"]
 
 		// Repos with external issue trackers might still need to reference local PRs
 		// We need to concern with the first one that shows up in the text, whichever it is
-		found, ref = references.FindRenderizableReferenceNumeric(node.Data, exttrack && alphanum)
-		if exttrack && alphanum {
-			if found2, ref2 := references.FindRenderizableReferenceAlphanumeric(node.Data); found2 {
-				if !found || ref2.RefLocation.Start < ref.RefLocation.Start {
-					found = true
-					ref = ref2
-				}
+		isNumericStyle := ctx.Metas["style"] == "" || ctx.Metas["style"] == IssueNameStyleNumeric
+		foundNumeric, refNumeric := references.FindRenderizableReferenceNumeric(node.Data, hasExtTrackFormat && !isNumericStyle)
+
+		switch ctx.Metas["style"] {
+		case "", IssueNameStyleNumeric:
+			found, ref = foundNumeric, refNumeric
+		case IssueNameStyleAlphanumeric:
+			found, ref = references.FindRenderizableReferenceAlphanumeric(node.Data)
+		case IssueNameStyleRegexp:
+			pattern, err := regexplru.GetCompiled(ctx.Metas["regexp"])
+			if err != nil {
+				return
+			}
+			found, ref = references.FindRenderizableReferenceRegexp(node.Data, pattern)
+		}
+
+		// Repos with external issue trackers might still need to reference local PRs
+		// We need to concern with the first one that shows up in the text, whichever it is
+		if hasExtTrackFormat && !isNumericStyle && refNumeric != nil {
+			// If numeric (PR) was found, and it was BEFORE the non-numeric pattern, use that
+			// Allow a free-pass when non-numeric pattern wasn't found.
+			if found && (ref == nil || refNumeric.RefLocation.Start < ref.RefLocation.Start) {
+				found = foundNumeric
+				ref = refNumeric
 			}
 		}
 		if !found {
@@ -828,9 +899,16 @@ func issueIndexPatternProcessor(ctx *RenderContext, node *html.Node) {
 
 		var link *html.Node
 		reftext := node.Data[ref.RefLocation.Start:ref.RefLocation.End]
-		if exttrack && !ref.IsPull {
+		if hasExtTrackFormat && !ref.IsPull {
 			ctx.Metas["index"] = ref.Issue
-			link = createLink(com.Expand(ctx.Metas["format"], ctx.Metas), reftext, "ref-issue")
+
+			res, err := vars.Expand(ctx.Metas["format"], ctx.Metas)
+			if err != nil {
+				// here we could just log the error and continue the rendering
+				log.Error("unable to expand template vars for ref %s, err: %v", ref.Issue, err)
+			}
+
+			link = createLink(res, reftext, "ref-issue ref-external-issue")
 		} else {
 			// Path determines the type of link that will be rendered. It's unknown at this point whether
 			// the linked item is actually a PR or an issue. Luckily it's of no real consequence because
@@ -854,7 +932,7 @@ func issueIndexPatternProcessor(ctx *RenderContext, node *html.Node) {
 
 		// Decorate action keywords if actionable
 		var keyword *html.Node
-		if references.IsXrefActionable(ref, exttrack, alphanum) {
+		if references.IsXrefActionable(ref, hasExtTrackFormat) {
 			keyword = createKeyword(node.Data[ref.ActionLocation.Start:ref.ActionLocation.End])
 		} else {
 			keyword = &html.Node{
@@ -868,6 +946,23 @@ func issueIndexPatternProcessor(ctx *RenderContext, node *html.Node) {
 		}
 		replaceContentList(node, ref.ActionLocation.Start, ref.RefLocation.End, []*html.Node{keyword, spaces, link})
 		node = node.NextSibling.NextSibling.NextSibling.NextSibling
+	}
+}
+
+func commitCrossReferencePatternProcessor(ctx *RenderContext, node *html.Node) {
+	next := node.NextSibling
+
+	for node != nil && node != next {
+		found, ref := references.FindRenderizableCommitCrossReference(node.Data)
+		if !found {
+			return
+		}
+
+		reftext := ref.Owner + "/" + ref.Name + "@" + base.ShortSha(ref.CommitSha)
+		link := createLink(util.URLJoin(setting.AppSubURL, ref.Owner, ref.Name, "commit", ref.CommitSha), reftext, "commit")
+
+		replaceContent(node, ref.RefLocation.Start, ref.RefLocation.End, link)
+		node = node.NextSibling.NextSibling
 	}
 }
 
@@ -921,8 +1016,60 @@ func fullSha1PatternProcessor(ctx *RenderContext, node *html.Node) {
 		if hash != "" {
 			text += " (" + hash + ")"
 		}
-
 		replaceContent(node, start, end, createCodeLink(urlFull, text, "commit"))
+		node = node.NextSibling.NextSibling
+	}
+}
+
+func comparePatternProcessor(ctx *RenderContext, node *html.Node) {
+	if ctx.Metas == nil {
+		return
+	}
+
+	next := node.NextSibling
+	for node != nil && node != next {
+		m := comparePattern.FindStringSubmatchIndex(node.Data)
+		if m == nil {
+			return
+		}
+
+		// Ensure that every group (m[0]...m[7]) has a match
+		for i := 0; i < 8; i++ {
+			if m[i] == -1 {
+				return
+			}
+		}
+
+		urlFull := node.Data[m[0]:m[1]]
+		text1 := base.ShortSha(node.Data[m[2]:m[3]])
+		textDots := base.ShortSha(node.Data[m[4]:m[5]])
+		text2 := base.ShortSha(node.Data[m[6]:m[7]])
+
+		hash := ""
+		if m[9] > 0 {
+			hash = node.Data[m[8]:m[9]][1:]
+		}
+
+		start := m[0]
+		end := m[1]
+
+		// If url ends in '.', it's very likely that it is not part of the
+		// actual url but used to finish a sentence.
+		if strings.HasSuffix(urlFull, ".") {
+			end--
+			urlFull = urlFull[:len(urlFull)-1]
+			if hash != "" {
+				hash = hash[:len(hash)-1]
+			} else if text2 != "" {
+				text2 = text2[:len(text2)-1]
+			}
+		}
+
+		text := text1 + textDots + text2
+		if hash != "" {
+			text += " (" + hash + ")"
+		}
+		replaceContent(node, start, end, createCodeLink(urlFull, text, "compare"))
 		node = node.NextSibling.NextSibling
 	}
 }
@@ -1019,7 +1166,7 @@ func sha1CurrentPatternProcessor(ctx *RenderContext, node *html.Node) {
 		if !inCache {
 			if ctx.GitRepo == nil {
 				var err error
-				ctx.GitRepo, err = git.OpenRepository(ctx.Metas["repoPath"])
+				ctx.GitRepo, err = git.OpenRepository(ctx.Ctx, ctx.Metas["repoPath"])
 				if err != nil {
 					log.Error("unable to open repository: %s Error: %v", ctx.Metas["repoPath"], err)
 					return
@@ -1039,8 +1186,8 @@ func sha1CurrentPatternProcessor(ctx *RenderContext, node *html.Node) {
 			continue
 		}
 
-		replaceContent(node, m[2], m[3],
-			createCodeLink(util.URLJoin(setting.AppURL, ctx.Metas["user"], ctx.Metas["repo"], "commit", hash), base.ShortSha(hash), "commit"))
+		link := util.URLJoin(setting.AppURL, ctx.Metas["user"], ctx.Metas["repo"], "commit", hash)
+		replaceContent(node, m[2], m[3], createCodeLink(link, base.ShortSha(hash), "commit"))
 		start = 0
 		node = node.NextSibling.NextSibling
 	}
@@ -1090,7 +1237,7 @@ func genDefaultLinkProcessor(defaultLink string) processor {
 		node.DataAtom = atom.A
 		node.Attr = []html.Attribute{
 			{Key: "href", Val: defaultLink},
-			{Key: "class", Val: "default-link"},
+			{Key: "class", Val: "default-link muted"},
 		}
 		node.FirstChild, node.LastChild = ch, ch
 	}

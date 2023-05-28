@@ -1,6 +1,5 @@
 // Copyright 2018 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 // Package cmd provides subcommands to the gitea binary - such as "web" or
 // "admin".
@@ -10,12 +9,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 
-	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/db"
+	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/util"
 
@@ -30,7 +31,7 @@ func argsSet(c *cli.Context, args ...string) error {
 			return errors.New(a + " is not set")
 		}
 
-		if util.IsEmptyString(a) {
+		if util.IsEmptyString(c.String(a)) {
 			return errors.New(a + " is required")
 		}
 	}
@@ -56,17 +57,18 @@ func confirm() (bool, error) {
 	}
 }
 
-func initDB() error {
-	return initDBDisableConsole(false)
-}
+func initDB(ctx context.Context) error {
+	setting.Init(&setting.Options{})
+	setting.LoadDBSetting()
+	setting.InitSQLLoggersForCli(log.INFO)
 
-func initDBDisableConsole(disableConsole bool) error {
-	setting.NewContext()
-	setting.InitDBConfig()
-
-	setting.NewXORMLogService(disableConsole)
-	if err := models.SetEngine(); err != nil {
-		return fmt.Errorf("models.SetEngine: %v", err)
+	if setting.Database.Type == "" {
+		log.Fatal(`Database settings are missing from the configuration file: %q.
+Ensure you are running in the correct environment or set the correct configuration file with -c.
+If this is the intended configuration file complete the [database] section.`, setting.CustomConf)
+	}
+	if err := db.InitEngine(ctx); err != nil {
+		return fmt.Errorf("unable to initialize the database using the configuration in %q. Error: %w", setting.CustomConf, err)
 	}
 	return nil
 }
@@ -91,4 +93,18 @@ func installSignals() (context.Context, context.CancelFunc) {
 	}()
 
 	return ctx, cancel
+}
+
+func setupConsoleLogger(level log.Level, colorize bool, out io.Writer) {
+	if out != os.Stdout && out != os.Stderr {
+		panic("setupConsoleLogger can only be used with os.Stdout or os.Stderr")
+	}
+
+	writeMode := log.WriterMode{
+		Level:        level,
+		Colorize:     colorize,
+		WriterOption: log.WriterConsoleOption{Stderr: out == os.Stderr},
+	}
+	writer := log.NewEventWriterConsole("console-default", writeMode)
+	log.GetManager().GetLogger(log.DEFAULT).RemoveAllWriters().AddWriters(writer)
 }

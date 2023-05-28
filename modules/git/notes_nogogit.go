@@ -1,24 +1,27 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
-// +build !gogit
+//go:build !gogit
 
 package git
 
 import (
 	"context"
-	"io/ioutil"
+	"io"
 	"strings"
 
 	"code.gitea.io/gitea/modules/log"
 )
 
 // GetNote retrieves the git-notes data for a given commit.
+// FIXME: Add LastCommitCache support
 func GetNote(ctx context.Context, repo *Repository, commitID string, note *Note) error {
 	log.Trace("Searching for git note corresponding to the commit %q in the repository %q", commitID, repo.Path)
 	notes, err := repo.GetCommit(NotesRef)
 	if err != nil {
+		if IsErrNotExist(err) {
+			return err
+		}
 		log.Error("Unable to get commit from ref %q. Error: %v", NotesRef, err)
 		return err
 	}
@@ -42,7 +45,10 @@ func GetNote(ctx context.Context, repo *Repository, commitID string, note *Note)
 			commitID = commitID[2:]
 		}
 		if err != nil {
-			log.Error("Unable to find git note corresponding to the commit %q. Error: %v", originalCommitID, err)
+			// Err may have been updated by the SubTree we need to recheck if it's again an ErrNotExist
+			if !IsErrNotExist(err) {
+				log.Error("Unable to find git note corresponding to the commit %q. Error: %v", originalCommitID, err)
+			}
 			return err
 		}
 	}
@@ -59,7 +65,7 @@ func GetNote(ctx context.Context, repo *Repository, commitID string, note *Note)
 			_ = dataRc.Close()
 		}
 	}()
-	d, err := ioutil.ReadAll(dataRc)
+	d, err := io.ReadAll(dataRc)
 	if err != nil {
 		log.Error("Unable to read blob with ID %q. Error: %v", blob.ID, err)
 		return err

@@ -1,7 +1,6 @@
 // Copyright 2015 The Gogs Authors. All rights reserved.
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package git
 
@@ -9,9 +8,9 @@ import (
 	"bytes"
 	"encoding/base64"
 	"io"
-	"io/ioutil"
 
 	"code.gitea.io/gitea/modules/typesniffer"
+	"code.gitea.io/gitea/modules/util"
 )
 
 // This file contains common functions between the gogit and !gogit variants for git Blobs
@@ -29,7 +28,7 @@ func (b *Blob) GetBlobContent() (string, error) {
 	}
 	defer dataRc.Close()
 	buf := make([]byte, 1024)
-	n, _ := dataRc.Read(buf)
+	n, _ := util.ReadAtMost(dataRc, buf)
 	buf = buf[:n]
 	return string(buf), nil
 }
@@ -83,7 +82,7 @@ func (b *Blob) GetBlobContentBase64() (string, error) {
 		}
 	}()
 
-	out, err := ioutil.ReadAll(pr)
+	out, err := io.ReadAll(pr)
 	if err != nil {
 		return "", err
 	}

@@ -1,17 +1,18 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package admin
 
 import (
 	"net/http"
 
-	"code.gitea.io/gitea/models"
+	repo_model "code.gitea.io/gitea/models/repo"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/repository"
+	repo_module "code.gitea.io/gitea/modules/repository"
 	"code.gitea.io/gitea/modules/util"
 	"code.gitea.io/gitea/routers/api/v1/utils"
+	repo_service "code.gitea.io/gitea/services/repository"
 )
 
 // ListUnadoptedRepositories lists the unadopted repositories that match the provided names
@@ -41,9 +42,13 @@ func ListUnadoptedRepositories(ctx *context.APIContext) {
 	//     "$ref": "#/responses/forbidden"
 
 	listOptions := utils.GetListOptions(ctx)
-	repoNames, count, err := repository.ListUnadoptedRepositories(ctx.FormString("query"), &listOptions)
+	if listOptions.Page == 0 {
+		listOptions.Page = 1
+	}
+	repoNames, count, err := repo_service.ListUnadoptedRepositories(ctx, ctx.FormString("query"), &listOptions)
 	if err != nil {
 		ctx.InternalServerError(err)
+		return
 	}
 
 	ctx.SetTotalCountHeader(int64(count))
@@ -79,9 +84,9 @@ func AdoptRepository(ctx *context.APIContext) {
 	ownerName := ctx.Params(":username")
 	repoName := ctx.Params(":reponame")
 
-	ctxUser, err := models.GetUserByName(ownerName)
+	ctxUser, err := user_model.GetUserByName(ctx, ownerName)
 	if err != nil {
-		if models.IsErrUserNotExist(err) {
+		if user_model.IsErrUserNotExist(err) {
 			ctx.NotFound()
 			return
 		}
@@ -90,12 +95,12 @@ func AdoptRepository(ctx *context.APIContext) {
 	}
 
 	// check not a repo
-	has, err := models.IsRepositoryExist(ctxUser, repoName)
+	has, err := repo_model.IsRepositoryModelExist(ctx, ctxUser, repoName)
 	if err != nil {
 		ctx.InternalServerError(err)
 		return
 	}
-	isDir, err := util.IsDir(models.RepoPath(ctxUser.Name, repoName))
+	isDir, err := util.IsDir(repo_model.RepoPath(ctxUser.Name, repoName))
 	if err != nil {
 		ctx.InternalServerError(err)
 		return
@@ -104,7 +109,7 @@ func AdoptRepository(ctx *context.APIContext) {
 		ctx.NotFound()
 		return
 	}
-	if _, err := repository.AdoptRepository(ctx.User, ctxUser, models.CreateRepoOptions{
+	if _, err := repo_service.AdoptRepository(ctx, ctx.Doer, ctxUser, repo_module.CreateRepoOptions{
 		Name:      repoName,
 		IsPrivate: true,
 	}); err != nil {
@@ -141,9 +146,9 @@ func DeleteUnadoptedRepository(ctx *context.APIContext) {
 	ownerName := ctx.Params(":username")
 	repoName := ctx.Params(":reponame")
 
-	ctxUser, err := models.GetUserByName(ownerName)
+	ctxUser, err := user_model.GetUserByName(ctx, ownerName)
 	if err != nil {
-		if models.IsErrUserNotExist(err) {
+		if user_model.IsErrUserNotExist(err) {
 			ctx.NotFound()
 			return
 		}
@@ -152,12 +157,12 @@ func DeleteUnadoptedRepository(ctx *context.APIContext) {
 	}
 
 	// check not a repo
-	has, err := models.IsRepositoryExist(ctxUser, repoName)
+	has, err := repo_model.IsRepositoryModelExist(ctx, ctxUser, repoName)
 	if err != nil {
 		ctx.InternalServerError(err)
 		return
 	}
-	isDir, err := util.IsDir(models.RepoPath(ctxUser.Name, repoName))
+	isDir, err := util.IsDir(repo_model.RepoPath(ctxUser.Name, repoName))
 	if err != nil {
 		ctx.InternalServerError(err)
 		return
@@ -167,7 +172,7 @@ func DeleteUnadoptedRepository(ctx *context.APIContext) {
 		return
 	}
 
-	if err := repository.DeleteUnadoptedRepository(ctx.User, ctxUser, repoName); err != nil {
+	if err := repo_service.DeleteUnadoptedRepository(ctx, ctx.Doer, ctxUser, repoName); err != nil {
 		ctx.InternalServerError(err)
 		return
 	}

@@ -1,13 +1,15 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package auth
 
 import (
+	"context"
 	"net/http"
+	"reflect"
+	"strings"
 
-	"code.gitea.io/gitea/models"
+	user_model "code.gitea.io/gitea/models/user"
 )
 
 // Ensure the struct implements the interface.
@@ -29,15 +31,33 @@ func NewGroup(methods ...Method) *Group {
 	}
 }
 
+// Add adds a new method to group
+func (b *Group) Add(method Method) {
+	b.methods = append(b.methods, method)
+}
+
+// Name returns group's methods name
+func (b *Group) Name() string {
+	names := make([]string, 0, len(b.methods))
+	for _, m := range b.methods {
+		if n, ok := m.(Named); ok {
+			names = append(names, n.Name())
+		} else {
+			names = append(names, reflect.TypeOf(m).Elem().Name())
+		}
+	}
+	return strings.Join(names, ",")
+}
+
 // Init does nothing as the Basic implementation does not need to allocate any resources
-func (b *Group) Init() error {
+func (b *Group) Init(ctx context.Context) error {
 	for _, method := range b.methods {
 		initializable, ok := method.(Initializable)
 		if !ok {
 			continue
 		}
 
-		if err := initializable.Init(); err != nil {
+		if err := initializable.Init(ctx); err != nil {
 			return err
 		}
 	}
@@ -59,23 +79,23 @@ func (b *Group) Free() error {
 }
 
 // Verify extracts and validates
-func (b *Group) Verify(req *http.Request, w http.ResponseWriter, store DataStore, sess SessionStore) *models.User {
-	if !models.HasEngine {
-		return nil
-	}
-
+func (b *Group) Verify(req *http.Request, w http.ResponseWriter, store DataStore, sess SessionStore) (*user_model.User, error) {
 	// Try to sign in with each of the enabled plugins
 	for _, ssoMethod := range b.methods {
-		user := ssoMethod.Verify(req, w, store, sess)
+		user, err := ssoMethod.Verify(req, w, store, sess)
+		if err != nil {
+			return nil, err
+		}
+
 		if user != nil {
 			if store.GetData()["AuthedMethod"] == nil {
 				if named, ok := ssoMethod.(Named); ok {
 					store.GetData()["AuthedMethod"] = named.Name()
 				}
 			}
-			return user
+			return user, nil
 		}
 	}
 
-	return nil
+	return nil, nil
 }

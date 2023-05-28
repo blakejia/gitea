@@ -1,12 +1,12 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package lfs
 
 import (
 	"context"
 	"io"
+	"net/http"
 	"net/url"
 )
 
@@ -24,9 +24,9 @@ type Client interface {
 }
 
 // NewClient creates a LFS client
-func NewClient(endpoint *url.URL, skipTLSVerify bool) Client {
+func NewClient(endpoint *url.URL, httpTransport *http.Transport) Client {
 	if endpoint.Scheme == "file" {
 		return newFilesystemClient(endpoint)
 	}
-	return newHTTPClient(endpoint, skipTLSVerify)
+	return newHTTPClient(endpoint, httpTransport)
 }

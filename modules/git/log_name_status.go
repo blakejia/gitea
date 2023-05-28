@@ -1,6 +1,5 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package git
 
@@ -8,54 +7,74 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"path"
 	"sort"
 	"strings"
+
+	"code.gitea.io/gitea/modules/container"
 
 	"github.com/djherbis/buffer"
 	"github.com/djherbis/nio/v3"
 )
 
 // LogNameStatusRepo opens git log --raw in the provided repo and returns a stdin pipe, a stdout reader and cancel function
-func LogNameStatusRepo(repository, head, treepath string, paths ...string) (*bufio.Reader, func()) {
+func LogNameStatusRepo(ctx context.Context, repository, head, treepath string, paths ...string) (*bufio.Reader, func()) {
 	// We often want to feed the commits in order into cat-file --batch, followed by their trees and sub trees as necessary.
 	// so let's create a batch stdin and stdout
 	stdoutReader, stdoutWriter := nio.Pipe(buffer.New(32 * 1024))
+
+	// Lets also create a context so that we can absolutely ensure that the command should die when we're done
+	ctx, ctxCancel := context.WithCancel(ctx)
+
 	cancel := func() {
+		ctxCancel()
 		_ = stdoutReader.Close()
 		_ = stdoutWriter.Close()
 	}
 
-	args := make([]string, 0, 8+len(paths))
-	args = append(args, "log", "--name-status", "-c", "--format=commit%x00%H %P%x00", "--parents", "--no-renames", "-t", "-z", head, "--")
+	cmd := NewCommand(ctx)
+	cmd.AddArguments("log", "--name-status", "-c", "--format=commit%x00%H %P%x00", "--parents", "--no-renames", "-t", "-z").AddDynamicArguments(head)
+
+	var files []string
 	if len(paths) < 70 {
 		if treepath != "" {
-			args = append(args, treepath)
+			files = append(files, treepath)
 			for _, pth := range paths {
 				if pth != "" {
-					args = append(args, path.Join(treepath, pth))
+					files = append(files, path.Join(treepath, pth))
 				}
 			}
 		} else {
 			for _, pth := range paths {
 				if pth != "" {
-					args = append(args, pth)
+					files = append(files, pth)
 				}
 			}
 		}
 	} else if treepath != "" {
-		args = append(args, treepath)
+		files = append(files, treepath)
 	}
+	// Use the :(literal) pathspec magic to handle edge cases with files named like ":file.txt" or "*.jpg"
+	for i, file := range files {
+		files[i] = ":(literal)" + file
+	}
+	cmd.AddDashesAndList(files...)
 
 	go func() {
 		stderr := strings.Builder{}
-		err := NewCommand(args...).RunInDirFullPipeline(repository, stdoutWriter, &stderr, nil)
+		err := cmd.Run(&RunOpts{
+			Dir:    repository,
+			Stdout: stdoutWriter,
+			Stderr: &stderr,
+		})
 		if err != nil {
 			_ = stdoutWriter.CloseWithError(ConcatenateError(err, (&stderr).String()))
-		} else {
-			_ = stdoutWriter.Close()
+			return
 		}
+
+		_ = stdoutWriter.Close()
 	}()
 
 	// For simplicities sake we'll us a buffered reader to read from the cat-file --batch
@@ -75,8 +94,8 @@ type LogNameStatusRepoParser struct {
 }
 
 // NewLogNameStatusRepoParser returns a new parser for a git log raw output
-func NewLogNameStatusRepoParser(repository, head, treepath string, paths ...string) *LogNameStatusRepoParser {
-	rd, cancel := LogNameStatusRepo(repository, head, treepath, paths...)
+func NewLogNameStatusRepoParser(ctx context.Context, repository, head, treepath string, paths ...string) *LogNameStatusRepoParser {
+	rd, cancel := LogNameStatusRepo(ctx, repository, head, treepath, paths...)
 	return &LogNameStatusRepoParser{
 		treepath: treepath,
 		paths:    paths,
@@ -166,6 +185,9 @@ func (g *LogNameStatusRepoParser) Next(treepath string, paths2ids map[string]int
 			} else if err != io.EOF {
 				return nil, err
 			}
+		}
+		if len(g.next) == 0 {
+			return &ret, nil
 		}
 		if g.next[0] == '\x00' {
 			g.buffull = false
@@ -268,6 +290,8 @@ func (g *LogNameStatusRepoParser) Close() {
 
 // WalkGitLog walks the git log --name-status for the head commit in the provided treepath and files
 func WalkGitLog(ctx context.Context, repo *Repository, head *Commit, treepath string, paths ...string) (map[string]string, error) {
+	headRef := head.ID.String()
+
 	tree, err := head.SubTree(treepath)
 	if err != nil {
 		return nil, err
@@ -308,8 +332,11 @@ func WalkGitLog(ctx context.Context, repo *Repository, head *Commit, treepath st
 		}
 	}
 
-	g := NewLogNameStatusRepoParser(repo.Path, head.ID.String(), treepath, paths...)
-	defer g.Close()
+	g := NewLogNameStatusRepoParser(ctx, repo.Path, head.ID.String(), treepath, paths...)
+	// don't use defer g.Close() here as g may change its value - instead wrap in a func
+	defer func() {
+		g.Close()
+	}()
 
 	results := make([]string, len(paths))
 	remaining := len(paths)
@@ -320,7 +347,7 @@ func WalkGitLog(ctx context.Context, repo *Repository, head *Commit, treepath st
 	lastEmptyParent := head.ID.String()
 	commitSinceLastEmptyParent := uint64(0)
 	commitSinceNextRestart := uint64(0)
-	parentRemaining := map[string]bool{}
+	parentRemaining := make(container.Set[string])
 
 	changed := make([]bool, len(paths))
 
@@ -328,18 +355,25 @@ heaploop:
 	for {
 		select {
 		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				break heaploop
+			}
+			g.Close()
 			return nil, ctx.Err()
 		default:
 		}
 		current, err := g.Next(treepath, path2idx, changed, maxpathlen)
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				break heaploop
+			}
 			g.Close()
 			return nil, err
 		}
 		if current == nil {
 			break heaploop
 		}
-		delete(parentRemaining, current.CommitID)
+		parentRemaining.Remove(current.CommitID)
 		if current.Paths != nil {
 			for i, found := range current.Paths {
 				if !found {
@@ -348,10 +382,16 @@ heaploop:
 				changed[i] = false
 				if results[i] == "" {
 					results[i] = current.CommitID
+					if err := repo.LastCommitCache.Put(headRef, path.Join(treepath, paths[i]), current.CommitID); err != nil {
+						return nil, err
+					}
 					delete(path2idx, paths[i])
 					remaining--
 					if results[0] == "" {
 						results[0] = current.CommitID
+						if err := repo.LastCommitCache.Put(headRef, treepath, current.CommitID); err != nil {
+							return nil, err
+						}
 						delete(path2idx, "")
 						remaining--
 					}
@@ -377,15 +417,13 @@ heaploop:
 						remainingPaths = append(remainingPaths, pth)
 					}
 				}
-				g = NewLogNameStatusRepoParser(repo.Path, lastEmptyParent, treepath, remainingPaths...)
-				parentRemaining = map[string]bool{}
+				g = NewLogNameStatusRepoParser(ctx, repo.Path, lastEmptyParent, treepath, remainingPaths...)
+				parentRemaining = make(container.Set[string])
 				nextRestart = (remaining * 3) / 4
 				continue heaploop
 			}
 		}
-		for _, parent := range current.ParentIDs {
-			parentRemaining[parent] = true
-		}
+		parentRemaining.AddMultiple(current.ParentIDs...)
 	}
 	g.Close()
 

@@ -1,13 +1,13 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package admin
 
 import (
 	"testing"
 
-	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/unittest"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/setting"
 	api "code.gitea.io/gitea/modules/structs"
 	"code.gitea.io/gitea/modules/test"
@@ -18,16 +18,15 @@ import (
 )
 
 func TestNewUserPost_MustChangePassword(t *testing.T) {
-
-	models.PrepareTestEnv(t)
+	unittest.PrepareTestEnv(t)
 	ctx := test.MockContext(t, "admin/users/new")
 
-	u := models.AssertExistsAndLoadBean(t, &models.User{
+	u := unittest.AssertExistsAndLoadBean(t, &user_model.User{
 		IsAdmin: true,
 		ID:      2,
-	}).(*models.User)
+	})
 
-	ctx.User = u
+	ctx.Doer = u
 
 	username := "gitea"
 	email := "gitea@gitea.io"
@@ -47,7 +46,7 @@ func TestNewUserPost_MustChangePassword(t *testing.T) {
 
 	assert.NotEmpty(t, ctx.Flash.SuccessMsg)
 
-	u, err := models.GetUserByName(username)
+	u, err := user_model.GetUserByName(ctx, username)
 
 	assert.NoError(t, err)
 	assert.Equal(t, username, u.Name)
@@ -56,15 +55,15 @@ func TestNewUserPost_MustChangePassword(t *testing.T) {
 }
 
 func TestNewUserPost_MustChangePasswordFalse(t *testing.T) {
-	models.PrepareTestEnv(t)
+	unittest.PrepareTestEnv(t)
 	ctx := test.MockContext(t, "admin/users/new")
 
-	u := models.AssertExistsAndLoadBean(t, &models.User{
+	u := unittest.AssertExistsAndLoadBean(t, &user_model.User{
 		IsAdmin: true,
 		ID:      2,
-	}).(*models.User)
+	})
 
-	ctx.User = u
+	ctx.Doer = u
 
 	username := "gitea"
 	email := "gitea@gitea.io"
@@ -84,7 +83,7 @@ func TestNewUserPost_MustChangePasswordFalse(t *testing.T) {
 
 	assert.NotEmpty(t, ctx.Flash.SuccessMsg)
 
-	u, err := models.GetUserByName(username)
+	u, err := user_model.GetUserByName(ctx, username)
 
 	assert.NoError(t, err)
 	assert.Equal(t, username, u.Name)
@@ -93,15 +92,15 @@ func TestNewUserPost_MustChangePasswordFalse(t *testing.T) {
 }
 
 func TestNewUserPost_InvalidEmail(t *testing.T) {
-	models.PrepareTestEnv(t)
+	unittest.PrepareTestEnv(t)
 	ctx := test.MockContext(t, "admin/users/new")
 
-	u := models.AssertExistsAndLoadBean(t, &models.User{
+	u := unittest.AssertExistsAndLoadBean(t, &user_model.User{
 		IsAdmin: true,
 		ID:      2,
-	}).(*models.User)
+	})
 
-	ctx.User = u
+	ctx.Doer = u
 
 	username := "gitea"
 	email := "gitea@gitea.io\r\n"
@@ -123,15 +122,15 @@ func TestNewUserPost_InvalidEmail(t *testing.T) {
 }
 
 func TestNewUserPost_VisibilityDefaultPublic(t *testing.T) {
-	models.PrepareTestEnv(t)
+	unittest.PrepareTestEnv(t)
 	ctx := test.MockContext(t, "admin/users/new")
 
-	u := models.AssertExistsAndLoadBean(t, &models.User{
+	u := unittest.AssertExistsAndLoadBean(t, &user_model.User{
 		IsAdmin: true,
 		ID:      2,
-	}).(*models.User)
+	})
 
-	ctx.User = u
+	ctx.Doer = u
 
 	username := "gitea"
 	email := "gitea@gitea.io"
@@ -151,7 +150,7 @@ func TestNewUserPost_VisibilityDefaultPublic(t *testing.T) {
 
 	assert.NotEmpty(t, ctx.Flash.SuccessMsg)
 
-	u, err := models.GetUserByName(username)
+	u, err := user_model.GetUserByName(ctx, username)
 
 	assert.NoError(t, err)
 	assert.Equal(t, username, u.Name)
@@ -161,15 +160,15 @@ func TestNewUserPost_VisibilityDefaultPublic(t *testing.T) {
 }
 
 func TestNewUserPost_VisibilityPrivate(t *testing.T) {
-	models.PrepareTestEnv(t)
+	unittest.PrepareTestEnv(t)
 	ctx := test.MockContext(t, "admin/users/new")
 
-	u := models.AssertExistsAndLoadBean(t, &models.User{
+	u := unittest.AssertExistsAndLoadBean(t, &user_model.User{
 		IsAdmin: true,
 		ID:      2,
-	}).(*models.User)
+	})
 
-	ctx.User = u
+	ctx.Doer = u
 
 	username := "gitea"
 	email := "gitea@gitea.io"
@@ -190,7 +189,7 @@ func TestNewUserPost_VisibilityPrivate(t *testing.T) {
 
 	assert.NotEmpty(t, ctx.Flash.SuccessMsg)
 
-	u, err := models.GetUserByName(username)
+	u, err := user_model.GetUserByName(ctx, username)
 
 	assert.NoError(t, err)
 	assert.Equal(t, username, u.Name)

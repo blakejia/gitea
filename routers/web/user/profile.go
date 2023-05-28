@@ -1,130 +1,90 @@
 // Copyright 2015 The Gogs Authors. All rights reserved.
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package user
 
 import (
 	"fmt"
 	"net/http"
-	"path"
 	"strings"
 
-	"code.gitea.io/gitea/models"
+	activities_model "code.gitea.io/gitea/models/activities"
+	"code.gitea.io/gitea/models/db"
+	"code.gitea.io/gitea/models/organization"
+	project_model "code.gitea.io/gitea/models/project"
+	repo_model "code.gitea.io/gitea/models/repo"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/context"
+	"code.gitea.io/gitea/modules/git"
 	"code.gitea.io/gitea/modules/markup"
 	"code.gitea.io/gitea/modules/markup/markdown"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/util"
+	"code.gitea.io/gitea/routers/web/feed"
 	"code.gitea.io/gitea/routers/web/org"
 )
 
-// GetUserByName get user by name
-func GetUserByName(ctx *context.Context, name string) *models.User {
-	user, err := models.GetUserByName(name)
-	if err != nil {
-		if models.IsErrUserNotExist(err) {
-			if redirectUserID, err := models.LookupUserRedirect(name); err == nil {
-				context.RedirectToUser(ctx, name, redirectUserID)
-			} else {
-				ctx.NotFound("GetUserByName", err)
-			}
-		} else {
-			ctx.ServerError("GetUserByName", err)
-		}
-		return nil
-	}
-	return user
-}
-
-// GetUserByParams returns user whose name is presented in URL paramenter.
-func GetUserByParams(ctx *context.Context) *models.User {
-	return GetUserByName(ctx, ctx.Params(":username"))
-}
-
 // Profile render user's profile page
 func Profile(ctx *context.Context) {
-	uname := ctx.Params(":username")
-
-	// Special handle for FireFox requests favicon.ico.
-	if uname == "favicon.ico" {
-		ctx.ServeFile(path.Join(setting.StaticRootPath, "public/img/favicon.png"))
+	if strings.Contains(ctx.Req.Header.Get("Accept"), "application/rss+xml") {
+		feed.ShowUserFeedRSS(ctx)
+		return
+	}
+	if strings.Contains(ctx.Req.Header.Get("Accept"), "application/atom+xml") {
+		feed.ShowUserFeedAtom(ctx)
 		return
 	}
 
-	if strings.HasSuffix(uname, ".png") {
-		ctx.Error(http.StatusNotFound)
-		return
-	}
-
-	isShowKeys := false
-	if strings.HasSuffix(uname, ".keys") {
-		isShowKeys = true
-		uname = strings.TrimSuffix(uname, ".keys")
-	}
-
-	isShowGPG := false
-	if strings.HasSuffix(uname, ".gpg") {
-		isShowGPG = true
-		uname = strings.TrimSuffix(uname, ".gpg")
-	}
-
-	ctxUser := GetUserByName(ctx, uname)
-	if ctx.Written() {
-		return
-	}
-
-	if ctxUser.IsOrganization() {
+	if ctx.ContextUser.IsOrganization() {
 		org.Home(ctx)
 		return
 	}
 
 	// check view permissions
-	if !ctxUser.IsVisibleToUser(ctx.User) {
-		ctx.NotFound("user", fmt.Errorf(uname))
+	if !user_model.IsUserVisibleToViewer(ctx, ctx.ContextUser, ctx.Doer) {
+		ctx.NotFound("user", fmt.Errorf(ctx.ContextUser.Name))
 		return
 	}
 
-	// Show SSH keys.
-	if isShowKeys {
-		ShowSSHKeys(ctx, ctxUser.ID)
-		return
-	}
-
-	// Show GPG keys.
-	if isShowGPG {
-		ShowGPGKeys(ctx, ctxUser.ID)
-		return
-	}
+	// advertise feed via meta tag
+	ctx.Data["FeedURL"] = ctx.ContextUser.HomeLink()
 
 	// Show OpenID URIs
-	openIDs, err := models.GetUserOpenIDs(ctxUser.ID)
+	openIDs, err := user_model.GetUserOpenIDs(ctx.ContextUser.ID)
 	if err != nil {
 		ctx.ServerError("GetUserOpenIDs", err)
 		return
 	}
 
-	ctx.Data["Title"] = ctxUser.DisplayName()
+	var isFollowing bool
+	if ctx.Doer != nil {
+		isFollowing = user_model.IsFollowing(ctx.Doer.ID, ctx.ContextUser.ID)
+	}
+
+	ctx.Data["Title"] = ctx.ContextUser.DisplayName()
 	ctx.Data["PageIsUserProfile"] = true
-	ctx.Data["Owner"] = ctxUser
+	ctx.Data["ContextUser"] = ctx.ContextUser
 	ctx.Data["OpenIDs"] = openIDs
+	ctx.Data["IsFollowing"] = isFollowing
 
 	if setting.Service.EnableUserHeatmap {
-		data, err := models.GetUserHeatmapDataByUser(ctxUser, ctx.User)
+		data, err := activities_model.GetUserHeatmapDataByUser(ctx.ContextUser, ctx.Doer)
 		if err != nil {
 			ctx.ServerError("GetUserHeatmapDataByUser", err)
 			return
 		}
 		ctx.Data["HeatmapData"] = data
+		ctx.Data["HeatmapTotalContributions"] = activities_model.GetTotalContributionsInHeatmap(data)
 	}
 
-	if len(ctxUser.Description) != 0 {
+	if len(ctx.ContextUser.Description) != 0 {
 		content, err := markdown.RenderString(&markup.RenderContext{
 			URLPrefix: ctx.Repo.RepoLink,
 			Metas:     map[string]string{"mode": "document"},
 			GitRepo:   ctx.Repo.GitRepo,
-		}, ctxUser.Description)
+			Ctx:       ctx,
+		}, ctx.ContextUser.Description)
 		if err != nil {
 			ctx.ServerError("RenderString", err)
 			return
@@ -132,16 +92,58 @@ func Profile(ctx *context.Context) {
 		ctx.Data["RenderedDescription"] = content
 	}
 
-	showPrivate := ctx.IsSigned && (ctx.User.IsAdmin || ctx.User.ID == ctxUser.ID)
+	repo, err := repo_model.GetRepositoryByName(ctx.ContextUser.ID, ".profile")
+	if err == nil && !repo.IsEmpty {
+		gitRepo, err := git.OpenRepository(ctx, repo.RepoPath())
+		if err != nil {
+			ctx.ServerError("OpenRepository", err)
+			return
+		}
+		defer gitRepo.Close()
+		commit, err := gitRepo.GetBranchCommit(repo.DefaultBranch)
+		if err != nil {
+			ctx.ServerError("GetBranchCommit", err)
+			return
+		}
+		blob, err := commit.GetBlobByPath("README.md")
+		if err == nil {
+			bytes, err := blob.GetBlobContent()
+			if err != nil {
+				ctx.ServerError("GetBlobContent", err)
+				return
+			}
+			profileContent, err := markdown.RenderString(&markup.RenderContext{
+				Ctx:     ctx,
+				GitRepo: gitRepo,
+			}, bytes)
+			if err != nil {
+				ctx.ServerError("RenderString", err)
+				return
+			}
+			ctx.Data["ProfileReadme"] = profileContent
+		}
+	}
 
-	orgs, err := models.GetOrgsByUserID(ctxUser.ID, showPrivate)
+	showPrivate := ctx.IsSigned && (ctx.Doer.IsAdmin || ctx.Doer.ID == ctx.ContextUser.ID)
+
+	orgs, err := organization.FindOrgs(organization.FindOrgOptions{
+		UserID:         ctx.ContextUser.ID,
+		IncludePrivate: showPrivate,
+	})
 	if err != nil {
-		ctx.ServerError("GetOrgsByUserIDDesc", err)
+		ctx.ServerError("FindOrgs", err)
 		return
 	}
 
 	ctx.Data["Orgs"] = orgs
-	ctx.Data["HasOrgsVisible"] = models.HasOrgsVisible(orgs, ctx.User)
+	ctx.Data["HasOrgsVisible"] = organization.HasOrgsVisible(orgs, ctx.Doer)
+
+	badges, _, err := user_model.GetUserBadges(ctx, ctx.ContextUser)
+	if err != nil {
+		ctx.ServerError("GetUserBadges", err)
+		return
+	}
+	ctx.Data["Badges"] = badges
 
 	tab := ctx.FormString("tab")
 	ctx.Data["TabName"] = tab
@@ -151,94 +153,116 @@ func Profile(ctx *context.Context) {
 		page = 1
 	}
 
+	pagingNum := setting.UI.User.RepoPagingNum
+	if tab == "activity" {
+		pagingNum = setting.UI.FeedPagingNum
+	}
+
 	topicOnly := ctx.FormBool("topic")
 
 	var (
-		repos   []*models.Repository
+		repos   []*repo_model.Repository
 		count   int64
 		total   int
-		orderBy models.SearchOrderBy
+		orderBy db.SearchOrderBy
 	)
 
 	ctx.Data["SortType"] = ctx.FormString("sort")
 	switch ctx.FormString("sort") {
 	case "newest":
-		orderBy = models.SearchOrderByNewest
+		orderBy = db.SearchOrderByNewest
 	case "oldest":
-		orderBy = models.SearchOrderByOldest
+		orderBy = db.SearchOrderByOldest
 	case "recentupdate":
-		orderBy = models.SearchOrderByRecentUpdated
+		orderBy = db.SearchOrderByRecentUpdated
 	case "leastupdate":
-		orderBy = models.SearchOrderByLeastUpdated
+		orderBy = db.SearchOrderByLeastUpdated
 	case "reversealphabetically":
-		orderBy = models.SearchOrderByAlphabeticallyReverse
+		orderBy = db.SearchOrderByAlphabeticallyReverse
 	case "alphabetically":
-		orderBy = models.SearchOrderByAlphabetically
+		orderBy = db.SearchOrderByAlphabetically
 	case "moststars":
-		orderBy = models.SearchOrderByStarsReverse
+		orderBy = db.SearchOrderByStarsReverse
 	case "feweststars":
-		orderBy = models.SearchOrderByStars
+		orderBy = db.SearchOrderByStars
 	case "mostforks":
-		orderBy = models.SearchOrderByForksReverse
+		orderBy = db.SearchOrderByForksReverse
 	case "fewestforks":
-		orderBy = models.SearchOrderByForks
+		orderBy = db.SearchOrderByForks
 	default:
 		ctx.Data["SortType"] = "recentupdate"
-		orderBy = models.SearchOrderByRecentUpdated
+		orderBy = db.SearchOrderByRecentUpdated
 	}
 
 	keyword := ctx.FormTrim("q")
 	ctx.Data["Keyword"] = keyword
+
+	language := ctx.FormTrim("language")
+	ctx.Data["Language"] = language
+
+	followers, numFollowers, err := user_model.GetUserFollowers(ctx, ctx.ContextUser, ctx.Doer, db.ListOptions{
+		PageSize: pagingNum,
+		Page:     page,
+	})
+	if err != nil {
+		ctx.ServerError("GetUserFollowers", err)
+		return
+	}
+	ctx.Data["NumFollowers"] = numFollowers
+	following, numFollowing, err := user_model.GetUserFollowing(ctx, ctx.ContextUser, ctx.Doer, db.ListOptions{
+		PageSize: pagingNum,
+		Page:     page,
+	})
+	if err != nil {
+		ctx.ServerError("GetUserFollowing", err)
+		return
+	}
+	ctx.Data["NumFollowing"] = numFollowing
+
 	switch tab {
 	case "followers":
-		items, err := ctxUser.GetFollowers(models.ListOptions{
-			PageSize: setting.UI.User.RepoPagingNum,
-			Page:     page,
-		})
-		if err != nil {
-			ctx.ServerError("GetFollowers", err)
-			return
-		}
-		ctx.Data["Cards"] = items
-
-		total = ctxUser.NumFollowers
+		ctx.Data["Cards"] = followers
+		total = int(count)
 	case "following":
-		items, err := ctxUser.GetFollowing(models.ListOptions{
-			PageSize: setting.UI.User.RepoPagingNum,
-			Page:     page,
-		})
-		if err != nil {
-			ctx.ServerError("GetFollowing", err)
-			return
-		}
-		ctx.Data["Cards"] = items
-
-		total = ctxUser.NumFollowing
+		ctx.Data["Cards"] = following
+		total = int(count)
 	case "activity":
-		retrieveFeeds(ctx, models.GetFeedsOptions{RequestedUser: ctxUser,
-			Actor:           ctx.User,
+		date := ctx.FormString("date")
+		items, count, err := activities_model.GetFeeds(ctx, activities_model.GetFeedsOptions{
+			RequestedUser:   ctx.ContextUser,
+			Actor:           ctx.Doer,
 			IncludePrivate:  showPrivate,
 			OnlyPerformedBy: true,
 			IncludeDeleted:  false,
-			Date:            ctx.FormString("date"),
-		})
-		if ctx.Written() {
-			return
-		}
-	case "stars":
-		ctx.Data["PageIsProfileStarList"] = true
-		repos, count, err = models.SearchRepository(&models.SearchRepoOptions{
-			ListOptions: models.ListOptions{
-				PageSize: setting.UI.User.RepoPagingNum,
+			Date:            date,
+			ListOptions: db.ListOptions{
+				PageSize: pagingNum,
 				Page:     page,
 			},
-			Actor:              ctx.User,
+		})
+		if err != nil {
+			ctx.ServerError("GetFeeds", err)
+			return
+		}
+		ctx.Data["Feeds"] = items
+		ctx.Data["Date"] = date
+
+		total = int(count)
+	case "stars":
+		ctx.Data["PageIsProfileStarList"] = true
+		repos, count, err = repo_model.SearchRepository(ctx, &repo_model.SearchRepoOptions{
+			ListOptions: db.ListOptions{
+				PageSize: pagingNum,
+				Page:     page,
+			},
+			Actor:              ctx.Doer,
 			Keyword:            keyword,
 			OrderBy:            orderBy,
 			Private:            ctx.IsSigned,
-			StarredByID:        ctxUser.ID,
+			StarredByID:        ctx.ContextUser.ID,
 			Collaborate:        util.OptionalBoolFalse,
 			TopicOnly:          topicOnly,
+			Language:           language,
 			IncludeDescription: setting.UI.SearchRepoDescription,
 		})
 		if err != nil {
@@ -248,28 +272,29 @@ func Profile(ctx *context.Context) {
 
 		total = int(count)
 	case "projects":
-		ctx.Data["OpenProjects"], _, err = models.GetProjects(models.ProjectSearchOptions{
+		ctx.Data["OpenProjects"], _, err = project_model.FindProjects(ctx, project_model.SearchOptions{
 			Page:     -1,
 			IsClosed: util.OptionalBoolFalse,
-			Type:     models.ProjectTypeIndividual,
+			Type:     project_model.TypeIndividual,
 		})
 		if err != nil {
 			ctx.ServerError("GetProjects", err)
 			return
 		}
 	case "watching":
-		repos, count, err = models.SearchRepository(&models.SearchRepoOptions{
-			ListOptions: models.ListOptions{
-				PageSize: setting.UI.User.RepoPagingNum,
+		repos, count, err = repo_model.SearchRepository(ctx, &repo_model.SearchRepoOptions{
+			ListOptions: db.ListOptions{
+				PageSize: pagingNum,
 				Page:     page,
 			},
-			Actor:              ctx.User,
+			Actor:              ctx.Doer,
 			Keyword:            keyword,
 			OrderBy:            orderBy,
 			Private:            ctx.IsSigned,
-			WatchedByID:        ctxUser.ID,
+			WatchedByID:        ctx.ContextUser.ID,
 			Collaborate:        util.OptionalBoolFalse,
 			TopicOnly:          topicOnly,
+			Language:           language,
 			IncludeDescription: setting.UI.SearchRepoDescription,
 		})
 		if err != nil {
@@ -279,18 +304,19 @@ func Profile(ctx *context.Context) {
 
 		total = int(count)
 	default:
-		repos, count, err = models.SearchRepository(&models.SearchRepoOptions{
-			ListOptions: models.ListOptions{
-				PageSize: setting.UI.User.RepoPagingNum,
+		repos, count, err = repo_model.SearchRepository(ctx, &repo_model.SearchRepoOptions{
+			ListOptions: db.ListOptions{
+				PageSize: pagingNum,
 				Page:     page,
 			},
-			Actor:              ctx.User,
+			Actor:              ctx.Doer,
 			Keyword:            keyword,
-			OwnerID:            ctxUser.ID,
+			OwnerID:            ctx.ContextUser.ID,
 			OrderBy:            orderBy,
 			Private:            ctx.IsSigned,
 			Collaborate:        util.OptionalBoolFalse,
 			TopicOnly:          topicOnly,
+			Language:           language,
 			IncludeDescription: setting.UI.SearchRepoDescription,
 		})
 		if err != nil {
@@ -303,34 +329,39 @@ func Profile(ctx *context.Context) {
 	ctx.Data["Repos"] = repos
 	ctx.Data["Total"] = total
 
-	pager := context.NewPagination(total, setting.UI.User.RepoPagingNum, page, 5)
+	pager := context.NewPagination(total, pagingNum, page, 5)
 	pager.SetDefaultParams(ctx)
+	pager.AddParam(ctx, "tab", "TabName")
+	if tab != "followers" && tab != "following" && tab != "activity" && tab != "projects" {
+		pager.AddParam(ctx, "language", "Language")
+	}
+	if tab == "activity" {
+		pager.AddParam(ctx, "date", "Date")
+	}
 	ctx.Data["Page"] = pager
+	ctx.Data["IsProjectEnabled"] = true
+	ctx.Data["IsPackageEnabled"] = setting.Packages.Enabled
+	ctx.Data["IsRepoIndexerEnabled"] = setting.Indexer.RepoIndexerEnabled
 
-	ctx.Data["ShowUserEmail"] = len(ctxUser.Email) > 0 && ctx.IsSigned && (!ctxUser.KeepEmailPrivate || ctxUser.ID == ctx.User.ID)
+	ctx.Data["ShowUserEmail"] = setting.UI.ShowUserEmail && ctx.ContextUser.Email != "" && ctx.IsSigned && !ctx.ContextUser.KeepEmailPrivate
 
 	ctx.HTML(http.StatusOK, tplProfile)
 }
 
 // Action response for follow/unfollow user request
 func Action(ctx *context.Context) {
-	u := GetUserByParams(ctx)
-	if ctx.Written() {
-		return
-	}
-
 	var err error
-	switch ctx.Params(":action") {
+	switch ctx.FormString("action") {
 	case "follow":
-		err = models.FollowUser(ctx.User.ID, u.ID)
+		err = user_model.FollowUser(ctx.Doer.ID, ctx.ContextUser.ID)
 	case "unfollow":
-		err = models.UnfollowUser(ctx.User.ID, u.ID)
+		err = user_model.UnfollowUser(ctx.Doer.ID, ctx.ContextUser.ID)
 	}
 
 	if err != nil {
-		ctx.ServerError(fmt.Sprintf("Action (%s)", ctx.Params(":action")), err)
+		ctx.ServerError(fmt.Sprintf("Action (%s)", ctx.FormString("action")), err)
 		return
 	}
-
-	ctx.RedirectToFirst(ctx.FormString("redirect_to"), u.HomeLink())
+	// FIXME: We should check this URL and make sure that it's a valid Gitea URL
+	ctx.RedirectToFirst(ctx.FormString("redirect_to"), ctx.ContextUser.HomeLink())
 }

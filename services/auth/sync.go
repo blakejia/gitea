@@ -1,13 +1,13 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package auth
 
 import (
 	"context"
 
-	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/auth"
+	"code.gitea.io/gitea/models/db"
 	"code.gitea.io/gitea/modules/log"
 )
 
@@ -15,7 +15,7 @@ import (
 func SyncExternalUsers(ctx context.Context, updateExisting bool) error {
 	log.Trace("Doing: SyncExternalUsers")
 
-	ls, err := models.LoginSources()
+	ls, err := auth.Sources()
 	if err != nil {
 		log.Error("SyncExternalUsers: %v", err)
 		return err
@@ -28,7 +28,7 @@ func SyncExternalUsers(ctx context.Context, updateExisting bool) error {
 		select {
 		case <-ctx.Done():
 			log.Warn("SyncExternalUsers: Cancelled before update of %s", s.Name)
-			return models.ErrCancelledf("Before update of %s", s.Name)
+			return db.ErrCancelledf("Before update of %s", s.Name)
 		default:
 		}
 

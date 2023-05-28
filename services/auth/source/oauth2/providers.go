@@ -1,14 +1,14 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package oauth2
 
 import (
+	"errors"
 	"net/url"
 	"sort"
 
-	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/auth"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
 
@@ -34,7 +34,7 @@ type GothProvider interface {
 	GothProviderCreator
 }
 
-// ImagedProvider provide an overrided image setting for the provider
+// ImagedProvider provide an overridden image setting for the provider
 type ImagedProvider struct {
 	GothProvider
 	image string
@@ -54,7 +54,7 @@ func NewImagedProvider(image string, provider GothProvider) *ImagedProvider {
 }
 
 // Providers contains the map of registered OAuth2 providers in Gitea (based on goth)
-// key is used to map the OAuth2Provider with the goth provider type (also in LoginSource.OAuth2Config.Provider)
+// key is used to map the OAuth2Provider with the goth provider type (also in AuthSource.OAuth2Config.Provider)
 // value is used to store display data
 var gothProviders = map[string]GothProvider{}
 
@@ -87,14 +87,14 @@ func GetOAuth2Providers() []Provider {
 func GetActiveOAuth2Providers() ([]string, map[string]Provider, error) {
 	// Maybe also separate used and unused providers so we can force the registration of only 1 active provider for each type
 
-	loginSources, err := models.GetActiveOAuth2ProviderLoginSources()
+	authSources, err := auth.GetActiveOAuth2ProviderSources()
 	if err != nil {
 		return nil, nil, err
 	}
 
 	var orderedKeys []string
 	providers := make(map[string]Provider)
-	for _, source := range loginSources {
+	for _, source := range authSources {
 		prov := gothProviders[source.Cfg.(*Source).Provider]
 		if source.Cfg.(*Source).IconURL != "" {
 			prov = &ImagedProvider{prov, source.Cfg.(*Source).IconURL}
@@ -138,6 +138,9 @@ func ClearProviders() {
 	goth.ClearProviders()
 }
 
+// ErrAuthSourceNotActived login source is not actived error
+var ErrAuthSourceNotActived = errors.New("auth source is not actived")
+
 // used to create different types of goth providers
 func createProvider(providerName string, source *Source) (goth.Provider, error) {
 	callbackURL := setting.AppURL + "user/oauth2/" + url.PathEscape(providerName) + "/callback"
@@ -147,7 +150,7 @@ func createProvider(providerName string, source *Source) (goth.Provider, error) 
 
 	p, ok := gothProviders[source.Provider]
 	if !ok {
-		return nil, models.ErrLoginSourceNotActived
+		return nil, ErrAuthSourceNotActived
 	}
 
 	provider, err = p.CreateGothProvider(providerName, callbackURL, source)

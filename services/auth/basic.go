@@ -1,7 +1,6 @@
 // Copyright 2014 The Gogs Authors. All rights reserved.
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package auth
 
@@ -9,7 +8,9 @@ import (
 	"net/http"
 	"strings"
 
-	"code.gitea.io/gitea/models"
+	actions_model "code.gitea.io/gitea/models/actions"
+	auth_model "code.gitea.io/gitea/models/auth"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/base"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
@@ -23,35 +24,37 @@ var (
 	_ Named  = &Basic{}
 )
 
+// BasicMethodName is the constant name of the basic authentication method
+const BasicMethodName = "basic"
+
 // Basic implements the Auth interface and authenticates requests (API requests
 // only) by looking for Basic authentication data or "x-oauth-basic" token in the "Authorization"
 // header.
-type Basic struct {
-}
+type Basic struct{}
 
 // Name represents the name of auth method
 func (b *Basic) Name() string {
-	return "basic"
+	return BasicMethodName
 }
 
 // Verify extracts and validates Basic data (username and password/token) from the
 // "Authorization" header of the request and returns the corresponding user object for that
 // name/token on successful validation.
 // Returns nil if header is empty or validation fails.
-func (b *Basic) Verify(req *http.Request, w http.ResponseWriter, store DataStore, sess SessionStore) *models.User {
+func (b *Basic) Verify(req *http.Request, w http.ResponseWriter, store DataStore, sess SessionStore) (*user_model.User, error) {
 	// Basic authentication should only fire on API, Download or on Git or LFSPaths
-	if !middleware.IsAPIPath(req) && !isAttachmentDownload(req) && !isGitRawOrLFSPath(req) {
-		return nil
+	if !middleware.IsAPIPath(req) && !isContainerPath(req) && !isAttachmentDownload(req) && !isGitRawReleaseOrLFSPath(req) {
+		return nil, nil
 	}
 
 	baHead := req.Header.Get("Authorization")
 	if len(baHead) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	auths := strings.SplitN(baHead, " ", 2)
-	if len(auths) != 2 || (auths[0] != "Basic" && auths[0] != "basic") {
-		return nil
+	if len(auths) != 2 || (strings.ToLower(auths[0]) != "basic") {
+		return nil, nil
 	}
 
 	uname, passwd, _ := base.BasicAuthDecode(auths[1])
@@ -68,54 +71,72 @@ func (b *Basic) Verify(req *http.Request, w http.ResponseWriter, store DataStore
 		log.Trace("Basic Authorization: Attempting login with username as token")
 	}
 
+	// check oauth2 token
 	uid := CheckOAuthAccessToken(authToken)
 	if uid != 0 {
 		log.Trace("Basic Authorization: Valid OAuthAccessToken for user[%d]", uid)
 
-		u, err := models.GetUserByID(uid)
+		u, err := user_model.GetUserByID(req.Context(), uid)
 		if err != nil {
 			log.Error("GetUserByID:  %v", err)
-			return nil
+			return nil, err
 		}
 
 		store.GetData()["IsApiToken"] = true
-		return u
+		return u, nil
 	}
 
-	token, err := models.GetAccessTokenBySHA(authToken)
+	// check personal access token
+	token, err := auth_model.GetAccessTokenBySHA(authToken)
 	if err == nil {
 		log.Trace("Basic Authorization: Valid AccessToken for user[%d]", uid)
-		u, err := models.GetUserByID(token.UID)
+		u, err := user_model.GetUserByID(req.Context(), token.UID)
 		if err != nil {
 			log.Error("GetUserByID:  %v", err)
-			return nil
+			return nil, err
 		}
 
 		token.UpdatedUnix = timeutil.TimeStampNow()
-		if err = models.UpdateAccessToken(token); err != nil {
+		if err = auth_model.UpdateAccessToken(token); err != nil {
 			log.Error("UpdateAccessToken:  %v", err)
 		}
 
 		store.GetData()["IsApiToken"] = true
-		return u
-	} else if !models.IsErrAccessTokenNotExist(err) && !models.IsErrAccessTokenEmpty(err) {
+		store.GetData()["ApiTokenScope"] = token.Scope
+		return u, nil
+	} else if !auth_model.IsErrAccessTokenNotExist(err) && !auth_model.IsErrAccessTokenEmpty(err) {
 		log.Error("GetAccessTokenBySha: %v", err)
 	}
 
+	// check task token
+	task, err := actions_model.GetRunningTaskByToken(req.Context(), authToken)
+	if err == nil && task != nil {
+		log.Trace("Basic Authorization: Valid AccessToken for task[%d]", task.ID)
+
+		store.GetData()["IsActionsToken"] = true
+		store.GetData()["ActionsTaskID"] = task.ID
+
+		return user_model.NewActionsUser(), nil
+	}
+
 	if !setting.Service.EnableBasicAuth {
-		return nil
+		return nil, nil
 	}
 
 	log.Trace("Basic Authorization: Attempting SignIn for %s", uname)
-	u, err := UserSignIn(uname, passwd)
+	u, source, err := UserSignIn(uname, passwd)
 	if err != nil {
-		if !models.IsErrUserNotExist(err) {
+		if !user_model.IsErrUserNotExist(err) {
 			log.Error("UserSignIn: %v", err)
 		}
-		return nil
+		return nil, err
+	}
+
+	if skipper, ok := source.Cfg.(LocalTwoFASkipper); ok && skipper.IsSkipLocalTwoFA() {
+		store.GetData()["SkipLocalTwoFA"] = true
 	}
 
 	log.Trace("Basic Authorization: Logged in user %-v", u)
 
-	return u
+	return u, nil
 }

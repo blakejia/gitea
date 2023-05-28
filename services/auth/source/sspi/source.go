@@ -1,11 +1,10 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package sspi
 
 import (
-	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/auth"
 	"code.gitea.io/gitea/modules/json"
 )
 
@@ -27,7 +26,7 @@ type Source struct {
 
 // FromDB fills up an SSPIConfig from serialized format.
 func (cfg *Source) FromDB(bs []byte) error {
-	return models.JSONUnmarshalHandleDoubleEncode(bs, &cfg)
+	return json.UnmarshalHandleDoubleEncode(bs, &cfg)
 }
 
 // ToDB exports an SSPIConfig to a serialized format.
@@ -36,5 +35,5 @@ func (cfg *Source) ToDB() ([]byte, error) {
 }
 
 func init() {
-	models.RegisterLoginTypeConfig(models.LoginSSPI, &Source{})
+	auth.RegisterTypeConfig(auth.SSPI, &Source{})
 }

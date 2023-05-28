@@ -1,12 +1,10 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
 // Copyright 2017 The Gogs Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package markup
 
 import (
-	"bytes"
 	"io"
 	"regexp"
 	"sync"
@@ -24,7 +22,10 @@ type Sanitizer struct {
 	init             sync.Once
 }
 
-var sanitizer = &Sanitizer{}
+var (
+	sanitizer     = &Sanitizer{}
+	allowAllRegex = regexp.MustCompile(".+")
+)
 
 // NewSanitizer initializes sanitizer with allowed attributes based on settings.
 // Multiple calls to this function will only create one instance of Sanitizer during
@@ -52,9 +53,22 @@ func InitializeSanitizer() {
 
 func createDefaultPolicy() *bluemonday.Policy {
 	policy := bluemonday.UGCPolicy()
+
+	// For JS code copy and Mermaid loading state
+	policy.AllowAttrs("class").Matching(regexp.MustCompile(`^code-block( is-loading)?$`)).OnElements("pre")
+
+	// For color preview
+	policy.AllowAttrs("class").Matching(regexp.MustCompile(`^color-preview$`)).OnElements("span")
+
+	// For attention
+	policy.AllowAttrs("class").Matching(regexp.MustCompile(`^attention-\w+$`)).OnElements("strong")
+	policy.AllowAttrs("class").Matching(regexp.MustCompile(`^attention-icon attention-\w+$`)).OnElements("span", "strong")
+	policy.AllowAttrs("class").Matching(regexp.MustCompile(`^svg octicon-\w+$`)).OnElements("svg")
+	policy.AllowAttrs("viewBox", "width", "height", "aria-hidden").OnElements("svg")
+	policy.AllowAttrs("fill-rule", "d").OnElements("path")
+
 	// For Chroma markdown plugin
-	policy.AllowAttrs("class").Matching(regexp.MustCompile(`^is-loading$`)).OnElements("pre")
-	policy.AllowAttrs("class").Matching(regexp.MustCompile(`^(chroma )?language-[\w-]+$`)).OnElements("code")
+	policy.AllowAttrs("class").Matching(regexp.MustCompile(`^(chroma )?language-[\w-]+( display)?( is-loading)?$`)).OnElements("code")
 
 	// Checkboxes
 	policy.AllowAttrs("type").Matching(regexp.MustCompile(`^checkbox$`)).OnElements("input")
@@ -63,10 +77,12 @@ func createDefaultPolicy() *bluemonday.Policy {
 	// Custom URL-Schemes
 	if len(setting.Markdown.CustomURLSchemes) > 0 {
 		policy.AllowURLSchemes(setting.Markdown.CustomURLSchemes...)
+	} else {
+		policy.AllowURLSchemesMatching(allowAllRegex)
 	}
 
 	// Allow classes for anchors
-	policy.AllowAttrs("class").Matching(regexp.MustCompile(`ref-issue`)).OnElements("a")
+	policy.AllowAttrs("class").Matching(regexp.MustCompile(`ref-issue( ref-external-issue)?`)).OnElements("a")
 
 	// Allow classes for task lists
 	policy.AllowAttrs("class").Matching(regexp.MustCompile(`task-list-item`)).OnElements("li")
@@ -81,10 +97,17 @@ func createDefaultPolicy() *bluemonday.Policy {
 	policy.AllowAttrs("class").Matching(regexp.MustCompile(`emoji`)).OnElements("img")
 
 	// Allow icons, emojis, chroma syntax and keyword markup on span
-	policy.AllowAttrs("class").Matching(regexp.MustCompile(`^((icon(\s+[\p{L}\p{N}_-]+)+)|(emoji))$|^([a-z][a-z0-9]{0,2})$|^` + keywordClass + `$`)).OnElements("span")
+	policy.AllowAttrs("class").Matching(regexp.MustCompile(`^((icon(\s+[\p{L}\p{N}_-]+)+)|(emoji)|(language-math display)|(language-math inline))$|^([a-z][a-z0-9]{0,2})$|^` + keywordClass + `$`)).OnElements("span")
+
+	// Allow 'style' attribute on text elements.
+	policy.AllowAttrs("style").OnElements("span", "p")
+
+	// Allow 'color' and 'background-color' properties for the style attribute on text elements.
+	policy.AllowStyles("color", "background-color").OnElements("span", "p")
 
 	// Allow generally safe attributes
-	generalSafeAttrs := []string{"abbr", "accept", "accept-charset",
+	generalSafeAttrs := []string{
+		"abbr", "accept", "accept-charset",
 		"accesskey", "action", "align", "alt",
 		"aria-describedby", "aria-hidden", "aria-label", "aria-labelledby",
 		"axis", "border", "cellpadding", "cellspacing", "char",
@@ -109,10 +132,12 @@ func createDefaultPolicy() *bluemonday.Policy {
 		"div", "ins", "del", "sup", "sub", "p", "ol", "ul", "table", "thead", "tbody", "tfoot", "blockquote",
 		"dl", "dt", "dd", "kbd", "q", "samp", "var", "hr", "ruby", "rt", "rp", "li", "tr", "td", "th", "s", "strike", "summary",
 		"details", "caption", "figure", "figcaption",
-		"abbr", "bdo", "cite", "dfn", "mark", "small", "span", "time", "wbr",
+		"abbr", "bdo", "cite", "dfn", "mark", "small", "span", "time", "video", "wbr",
 	}
 
 	policy.AllowAttrs(generalSafeAttrs...).OnElements(generalSafeElements...)
+
+	policy.AllowAttrs("src", "autoplay", "controls").OnElements("video")
 
 	policy.AllowAttrs("itemscope", "itemtype").OnElements("div")
 
@@ -146,11 +171,11 @@ func Sanitize(s string) string {
 }
 
 // SanitizeReader sanitizes a Reader
-func SanitizeReader(r io.Reader, renderer string) *bytes.Buffer {
+func SanitizeReader(r io.Reader, renderer string, w io.Writer) error {
 	NewSanitizer()
 	policy, exist := sanitizer.rendererPolicies[renderer]
 	if !exist {
 		policy = sanitizer.defaultPolicy
 	}
-	return policy.SanitizeReader(r)
+	return policy.SanitizeReaderToWriter(r, w)
 }

@@ -1,20 +1,23 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package cmd
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 
-	"code.gitea.io/gitea/modules/convert"
+	"code.gitea.io/gitea/modules/git"
 	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/migrations"
-	"code.gitea.io/gitea/modules/migrations/base"
+	base "code.gitea.io/gitea/modules/migration"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/structs"
+	"code.gitea.io/gitea/modules/util"
+	"code.gitea.io/gitea/services/convert"
+	"code.gitea.io/gitea/services/migrations"
 
 	"github.com/urfave/cli"
 )
@@ -76,15 +79,23 @@ wiki, issues, labels, releases, release_assets, milestones, pull_requests, comme
 }
 
 func runDumpRepository(ctx *cli.Context) error {
-	if err := initDB(); err != nil {
+	stdCtx, cancel := installSignals()
+	defer cancel()
+
+	if err := initDB(stdCtx); err != nil {
+		return err
+	}
+
+	// migrations.GiteaLocalUploader depends on git module
+	if err := git.InitSimple(context.Background()); err != nil {
 		return err
 	}
 
 	log.Info("AppPath: %s", setting.AppPath)
 	log.Info("AppWorkPath: %s", setting.AppWorkPath)
 	log.Info("Custom path: %s", setting.CustomPath)
-	log.Info("Log path: %s", setting.LogRootPath)
-	setting.InitDBConfig()
+	log.Info("Log path: %s", setting.Log.RootPath)
+	log.Info("Configuration file: %s", setting.CustomConf)
 
 	var (
 		serviceType structs.GitServiceType
@@ -104,7 +115,7 @@ func runDumpRepository(ctx *cli.Context) error {
 	}
 	serviceType = convert.ToGitServiceType(serviceStr)
 
-	var opts = base.MigrateOptions{
+	opts := base.MigrateOptions{
 		GitServiceType: serviceType,
 		CloneAddr:      cloneAddr,
 		AuthUsername:   ctx.String("auth_username"),
@@ -125,7 +136,9 @@ func runDumpRepository(ctx *cli.Context) error {
 	} else {
 		units := strings.Split(ctx.String("units"), ",")
 		for _, unit := range units {
-			switch strings.ToLower(unit) {
+			switch strings.ToLower(strings.TrimSpace(unit)) {
+			case "":
+				continue
 			case "wiki":
 				opts.Wiki = true
 			case "issues":
@@ -142,13 +155,29 @@ func runDumpRepository(ctx *cli.Context) error {
 				opts.Comments = true
 			case "pull_requests":
 				opts.PullRequests = true
+			default:
+				return errors.New("invalid unit: " + unit)
 			}
+		}
+	}
+
+	// the repo_dir will be removed if error occurs in DumpRepository
+	// make sure the directory doesn't exist or is empty, prevent from deleting user files
+	repoDir := ctx.String("repo_dir")
+	if exists, err := util.IsExist(repoDir); err != nil {
+		return fmt.Errorf("unable to stat repo_dir %q: %w", repoDir, err)
+	} else if exists {
+		if isDir, _ := util.IsDir(repoDir); !isDir {
+			return fmt.Errorf("repo_dir %q already exists but it's not a directory", repoDir)
+		}
+		if dir, _ := os.ReadDir(repoDir); len(dir) > 0 {
+			return fmt.Errorf("repo_dir %q is not empty", repoDir)
 		}
 	}
 
 	if err := migrations.DumpRepository(
 		context.Background(),
-		ctx.String("repo_dir"),
+		repoDir,
 		ctx.String("owner_name"),
 		opts,
 	); err != nil {

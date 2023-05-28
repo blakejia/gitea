@@ -1,6 +1,5 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package repo
 
@@ -9,7 +8,10 @@ import (
 	"net/http"
 	"strings"
 
-	"code.gitea.io/gitea/models"
+	git_model "code.gitea.io/gitea/models/git"
+	"code.gitea.io/gitea/models/organization"
+	"code.gitea.io/gitea/models/perm"
+	access_model "code.gitea.io/gitea/models/perm/access"
 	"code.gitea.io/gitea/modules/base"
 	"code.gitea.io/gitea/modules/context"
 	"code.gitea.io/gitea/modules/setting"
@@ -40,7 +42,7 @@ func NewProtectedTagPost(ctx *context.Context) {
 	repo := ctx.Repo.Repository
 	form := web.GetForm(ctx).(*forms.ProtectTagForm)
 
-	pt := &models.ProtectedTag{
+	pt := &git_model.ProtectedTag{
 		RepoID:      repo.ID,
 		NamePattern: strings.TrimSpace(form.NamePattern),
 	}
@@ -52,13 +54,13 @@ func NewProtectedTagPost(ctx *context.Context) {
 		pt.AllowlistTeamIDs, _ = base.StringsToInt64s(strings.Split(form.AllowlistTeams, ","))
 	}
 
-	if err := models.InsertProtectedTag(pt); err != nil {
+	if err := git_model.InsertProtectedTag(ctx, pt); err != nil {
 		ctx.ServerError("InsertProtectedTag", err)
 		return
 	}
 
 	ctx.Flash.Success(ctx.Tr("repo.settings.update_settings_success"))
-	ctx.Redirect(setting.AppSubURL + ctx.Req.URL.Path)
+	ctx.Redirect(setting.AppSubURL + ctx.Req.URL.EscapedPath())
 }
 
 // EditProtectedTag render the page to edit a protect tag
@@ -105,7 +107,7 @@ func EditProtectedTagPost(ctx *context.Context) {
 	pt.AllowlistUserIDs, _ = base.StringsToInt64s(strings.Split(form.AllowlistUsers, ","))
 	pt.AllowlistTeamIDs, _ = base.StringsToInt64s(strings.Split(form.AllowlistTeams, ","))
 
-	if err := models.UpdateProtectedTag(pt); err != nil {
+	if err := git_model.UpdateProtectedTag(ctx, pt); err != nil {
 		ctx.ServerError("UpdateProtectedTag", err)
 		return
 	}
@@ -121,7 +123,7 @@ func DeleteProtectedTagPost(ctx *context.Context) {
 		return
 	}
 
-	if err := models.DeleteProtectedTag(pt); err != nil {
+	if err := git_model.DeleteProtectedTag(ctx, pt); err != nil {
 		ctx.ServerError("DeleteProtectedTag", err)
 		return
 	}
@@ -131,17 +133,17 @@ func DeleteProtectedTagPost(ctx *context.Context) {
 }
 
 func setTagsContext(ctx *context.Context) error {
-	ctx.Data["Title"] = ctx.Tr("repo.settings")
+	ctx.Data["Title"] = ctx.Tr("repo.settings.tags")
 	ctx.Data["PageIsSettingsTags"] = true
 
-	protectedTags, err := ctx.Repo.Repository.GetProtectedTags()
+	protectedTags, err := git_model.GetProtectedTags(ctx, ctx.Repo.Repository.ID)
 	if err != nil {
 		ctx.ServerError("GetProtectedTags", err)
 		return err
 	}
 	ctx.Data["ProtectedTags"] = protectedTags
 
-	users, err := ctx.Repo.Repository.GetReaders()
+	users, err := access_model.GetRepoReaders(ctx.Repo.Repository)
 	if err != nil {
 		ctx.ServerError("Repo.Repository.GetReaders", err)
 		return err
@@ -149,7 +151,7 @@ func setTagsContext(ctx *context.Context) error {
 	ctx.Data["Users"] = users
 
 	if ctx.Repo.Owner.IsOrganization() {
-		teams, err := ctx.Repo.Owner.TeamsWithAccessToRepo(ctx.Repo.Repository.ID, models.AccessModeRead)
+		teams, err := organization.OrgFromUser(ctx.Repo.Owner).TeamsWithAccessToRepo(ctx.Repo.Repository.ID, perm.AccessModeRead)
 		if err != nil {
 			ctx.ServerError("Repo.Owner.TeamsWithAccessToRepo", err)
 			return err
@@ -160,13 +162,13 @@ func setTagsContext(ctx *context.Context) error {
 	return nil
 }
 
-func selectProtectedTagByContext(ctx *context.Context) *models.ProtectedTag {
+func selectProtectedTagByContext(ctx *context.Context) *git_model.ProtectedTag {
 	id := ctx.FormInt64("id")
 	if id == 0 {
 		id = ctx.ParamsInt64(":id")
 	}
 
-	tag, err := models.GetProtectedTagByID(id)
+	tag, err := git_model.GetProtectedTagByID(ctx, id)
 	if err != nil {
 		ctx.ServerError("GetProtectedTagByID", err)
 		return nil

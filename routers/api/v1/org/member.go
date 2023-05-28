@@ -1,36 +1,37 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package org
 
 import (
 	"net/http"
+	"net/url"
 
 	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/organization"
 	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/convert"
 	"code.gitea.io/gitea/modules/setting"
 	api "code.gitea.io/gitea/modules/structs"
 	"code.gitea.io/gitea/routers/api/v1/user"
 	"code.gitea.io/gitea/routers/api/v1/utils"
+	"code.gitea.io/gitea/services/convert"
 )
 
 // listMembers list an organization's members
 func listMembers(ctx *context.APIContext, publicOnly bool) {
-	opts := &models.FindOrgMembersOpts{
+	opts := &organization.FindOrgMembersOpts{
 		OrgID:       ctx.Org.Organization.ID,
 		PublicOnly:  publicOnly,
 		ListOptions: utils.GetListOptions(ctx),
 	}
 
-	count, err := models.CountOrgMembers(opts)
+	count, err := organization.CountOrgMembers(opts)
 	if err != nil {
 		ctx.InternalServerError(err)
 		return
 	}
 
-	members, _, err := models.FindOrgMembers(opts)
+	members, _, err := organization.FindOrgMembers(opts)
 	if err != nil {
 		ctx.InternalServerError(err)
 		return
@@ -38,7 +39,7 @@ func listMembers(ctx *context.APIContext, publicOnly bool) {
 
 	apiMembers := make([]*api.User, len(members))
 	for i, member := range members {
-		apiMembers[i] = convert.ToUser(member, ctx.User)
+		apiMembers[i] = convert.ToUser(ctx, member, ctx.Doer)
 	}
 
 	ctx.SetTotalCountHeader(count)
@@ -71,13 +72,13 @@ func ListMembers(ctx *context.APIContext) {
 	//     "$ref": "#/responses/UserList"
 
 	publicOnly := true
-	if ctx.User != nil {
-		isMember, err := ctx.Org.Organization.IsOrgMember(ctx.User.ID)
+	if ctx.Doer != nil {
+		isMember, err := ctx.Org.Organization.IsOrgMember(ctx.Doer.ID)
 		if err != nil {
 			ctx.Error(http.StatusInternalServerError, "IsOrgMember", err)
 			return
 		}
-		publicOnly = !isMember && !ctx.User.IsAdmin
+		publicOnly = !isMember && !ctx.Doer.IsAdmin
 	}
 	listMembers(ctx, publicOnly)
 }
@@ -129,7 +130,7 @@ func IsMember(ctx *context.APIContext) {
 	// responses:
 	//   "204":
 	//     description: user is a member
-	//   "302":
+	//   "303":
 	//     description: redirection to /orgs/{org}/public_members/{username}
 	//   "404":
 	//     description: user is not a member
@@ -138,12 +139,12 @@ func IsMember(ctx *context.APIContext) {
 	if ctx.Written() {
 		return
 	}
-	if ctx.User != nil {
-		userIsMember, err := ctx.Org.Organization.IsOrgMember(ctx.User.ID)
+	if ctx.Doer != nil {
+		userIsMember, err := ctx.Org.Organization.IsOrgMember(ctx.Doer.ID)
 		if err != nil {
 			ctx.Error(http.StatusInternalServerError, "IsOrgMember", err)
 			return
-		} else if userIsMember || ctx.User.IsAdmin {
+		} else if userIsMember || ctx.Doer.IsAdmin {
 			userToCheckIsMember, err := ctx.Org.Organization.IsOrgMember(userToCheck.ID)
 			if err != nil {
 				ctx.Error(http.StatusInternalServerError, "IsOrgMember", err)
@@ -153,14 +154,14 @@ func IsMember(ctx *context.APIContext) {
 				ctx.NotFound()
 			}
 			return
-		} else if ctx.User.ID == userToCheck.ID {
+		} else if ctx.Doer.ID == userToCheck.ID {
 			ctx.NotFound()
 			return
 		}
 	}
 
-	redirectURL := setting.AppURL + "api/v1/orgs/" + ctx.Org.Organization.Name + "/public_members/" + userToCheck.Name
-	ctx.Redirect(redirectURL, 302)
+	redirectURL := setting.AppSubURL + "/api/v1/orgs/" + url.PathEscape(ctx.Org.Organization.Name) + "/public_members/" + url.PathEscape(userToCheck.Name)
+	ctx.Redirect(redirectURL)
 }
 
 // IsPublicMember check if a user is a public member of an organization
@@ -189,7 +190,12 @@ func IsPublicMember(ctx *context.APIContext) {
 	if ctx.Written() {
 		return
 	}
-	if userToCheck.IsPublicMember(ctx.Org.Organization.ID) {
+	is, err := organization.IsPublicMembership(ctx.Org.Organization.ID, userToCheck.ID)
+	if err != nil {
+		ctx.Error(http.StatusInternalServerError, "IsPublicMembership", err)
+		return
+	}
+	if is {
 		ctx.Status(http.StatusNoContent)
 	} else {
 		ctx.NotFound()
@@ -224,11 +230,11 @@ func PublicizeMember(ctx *context.APIContext) {
 	if ctx.Written() {
 		return
 	}
-	if userToPublicize.ID != ctx.User.ID {
+	if userToPublicize.ID != ctx.Doer.ID {
 		ctx.Error(http.StatusForbidden, "", "Cannot publicize another member")
 		return
 	}
-	err := models.ChangeOrgUserStatus(ctx.Org.Organization.ID, userToPublicize.ID, true)
+	err := organization.ChangeOrgUserStatus(ctx.Org.Organization.ID, userToPublicize.ID, true)
 	if err != nil {
 		ctx.Error(http.StatusInternalServerError, "ChangeOrgUserStatus", err)
 		return
@@ -264,11 +270,11 @@ func ConcealMember(ctx *context.APIContext) {
 	if ctx.Written() {
 		return
 	}
-	if userToConceal.ID != ctx.User.ID {
+	if userToConceal.ID != ctx.Doer.ID {
 		ctx.Error(http.StatusForbidden, "", "Cannot conceal another member")
 		return
 	}
-	err := models.ChangeOrgUserStatus(ctx.Org.Organization.ID, userToConceal.ID, false)
+	err := organization.ChangeOrgUserStatus(ctx.Org.Organization.ID, userToConceal.ID, false)
 	if err != nil {
 		ctx.Error(http.StatusInternalServerError, "ChangeOrgUserStatus", err)
 		return
@@ -302,8 +308,8 @@ func DeleteMember(ctx *context.APIContext) {
 	if ctx.Written() {
 		return
 	}
-	if err := ctx.Org.Organization.RemoveMember(member.ID); err != nil {
-		ctx.Error(http.StatusInternalServerError, "RemoveMember", err)
+	if err := models.RemoveOrgUser(ctx.Org.Organization.ID, member.ID); err != nil {
+		ctx.Error(http.StatusInternalServerError, "RemoveOrgUser", err)
 	}
 	ctx.Status(http.StatusNoContent)
 }
